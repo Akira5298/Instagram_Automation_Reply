@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged with Xcode's generated Info.plist (GENERATE_INFOPLIST_FILE = YES). -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Allows plain http to localhost / your Mac on the local network during development.
+		     Your deployed backend must use https. -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ECHO connects to your development backend on this network.</string>
+</dict>
+</plist>
