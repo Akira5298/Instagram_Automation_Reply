@@ -37,7 +37,8 @@ def test_webhook_handshake(client):
 def test_webhook_signature(client):
     body = json.dumps({"object": "instagram", "entry": []}).encode()
     good = "sha256=" + hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
-    assert client.post("/webhooks/meta", content=body, headers={"X-Hub-Signature-256": good}).status_code == 200
+    # Valid signature but no database: 503 so Meta retries later.
+    assert client.post("/webhooks/meta", content=body, headers={"X-Hub-Signature-256": good}).status_code == 503
     assert client.post("/webhooks/meta", content=body,
                        headers={"X-Hub-Signature-256": "sha256=deadbeef"}).status_code == 403
     assert client.post("/webhooks/meta", content=body).status_code == 403

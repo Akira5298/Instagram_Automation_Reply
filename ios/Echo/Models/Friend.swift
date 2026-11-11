@@ -171,3 +171,29 @@ struct ActivityItem: Identifiable, Codable, Hashable, Sendable {
         }
     }
 }
+
+/// `GET /v1/instagram/status`
+struct InstagramStatus: Codable, Hashable, Sendable {
+    var connected: Bool
+    var configured: Bool
+    var provider: String
+    var mockAccount: Bool
+    var username: String?
+    var accountType: String?
+    var status: String?
+    var tokenExpiresAt: Date?
+    var webhooksSubscribed: Bool?
+    var lastWebhookAt: Date?
+    var lastSyncedAt: Date?
+    var lastError: String?
+
+    var usesMockInstagram: Bool { provider == "mock" }
+
+    var accountTypeTitle: String? {
+        switch accountType {
+        case "MEDIA_CREATOR": return "Creator"
+        case "BUSINESS": return "Business"
+        default: return accountType?.capitalized
+        }
+    }
+}

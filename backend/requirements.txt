@@ -7,6 +7,8 @@ anthropic>=2.8          # output_config (structured outputs + effort), thinking 
 psycopg[binary,pool]>=3.2
 python-dateutil>=2.9    # RRULE recurrence
 tzdata>=2024.1          # IANA time zones everywhere (incl. slim containers)
+cryptography>=43        # AES-GCM encryption of Instagram tokens
+python-multipart>=0.0.9 # Meta's form-encoded deauthorize / data-deletion callbacks
 
 # Dev / test
 pytest>=8.0

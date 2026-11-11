@@ -12,6 +12,7 @@ final class MessagingStore {
     private(set) var activity: [ActivityItem] = []
     private(set) var isLoading = false
     var errorMessage: String?
+    private(set) var instagramStatus: InstagramStatus?
 
     private let backend: MessagingBackend
 
@@ -31,6 +32,9 @@ final class MessagingStore {
     var isMock: Bool { !backend.isRemote }
     var friends: [Friend] { conversations.map(\.friend) }
     var unreadActivityCount: Int { activity.filter { $0.readAt == nil }.count }
+    /// Testing tools (simulate a friend's message, sample friends) only work
+    /// with the mock Instagram provider.
+    var usesMockInstagram: Bool { !isRemote || (instagramStatus?.usesMockInstagram ?? true) }
 
     // MARK: Loading
 
@@ -42,6 +46,36 @@ final class MessagingStore {
             jobs = try await backend.loadJobs()
             activity = try await backend.loadActivity()
         }
+        instagramStatus = try? await backend.loadInstagramStatus()
+    }
+
+    // MARK: Instagram connection
+
+    func refreshInstagramStatus() async {
+        await perform { instagramStatus = try await backend.loadInstagramStatus() }
+    }
+
+    func instagramAuthorizeURL() async -> URL? {
+        do {
+            return try await backend.instagramAuthorizeURL()
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func syncInstagram() async -> Int? {
+        var count: Int?
+        await perform {
+            count = try await backend.syncInstagram()
+            conversations = try await backend.loadConversations()
+        }
+        return count
+    }
+
+    func disconnectInstagram(deleteMessages: Bool) async {
+        await perform { try await backend.disconnectInstagram(deleteMessages: deleteMessages) }
+        await refresh()
     }
 
     func refreshJobs() async {

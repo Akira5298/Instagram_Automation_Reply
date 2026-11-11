@@ -16,8 +16,12 @@ struct MessagesView: View {
                         if viewModel.isMock {
                             Label("Offline sample conversations — connect your backend in Settings", systemImage: "testtube.2")
                                 .echoReadout(EchoColor.warning)
+                        } else if let username = viewModel.store.instagramStatus?.username,
+                                  viewModel.store.instagramStatus?.connected == true {
+                            Label("Instagram · @\(username)", systemImage: "checkmark.seal.fill")
+                                .echoReadout(EchoColor.success)
                         } else {
-                            Label("Mock Instagram on your server — real Instagram connects in Phase 4", systemImage: "server.rack")
+                            Label("Mock Instagram on your server — connect the real one in Settings", systemImage: "server.rack")
                                 .echoReadout(EchoColor.cyan)
                         }
 
@@ -34,7 +38,15 @@ struct MessagesView: View {
                         }
 
                         if viewModel.conversations.isEmpty {
-                            ContentUnavailableView.search(text: viewModel.searchText)
+                            if viewModel.searchText.isEmpty {
+                                ContentUnavailableView(
+                                    "No conversations yet",
+                                    systemImage: "bubble.left.and.bubble.right",
+                                    description: Text("When someone sends your Instagram account a DM, it appears here. New people start with AI replies off.")
+                                )
+                            } else {
+                                ContentUnavailableView.search(text: viewModel.searchText)
+                            }
                         }
                     }
                     .padding(.horizontal, EchoSpacing.md)

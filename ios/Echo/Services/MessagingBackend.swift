@@ -29,6 +29,12 @@ protocol MessagingBackend {
     /// nil when the backend doesn't hold the pause flag (mock mode).
     func loadAutomationPaused() async throws -> Bool?
     func setAutomationPaused(_ paused: Bool) async throws
+
+    // Instagram connection (backend only)
+    func loadInstagramStatus() async throws -> InstagramStatus?
+    func instagramAuthorizeURL() async throws -> URL
+    func syncInstagram() async throws -> Int
+    func disconnectInstagram(deleteMessages: Bool) async throws
 }
 
 // MARK: - Remote
@@ -36,6 +42,7 @@ protocol MessagingBackend {
 @MainActor
 final class RemoteMessagingBackend: MessagingBackend {
     private let api: APIClient
+    fileprivate var apiClient: APIClient { api }
 
     init(api: APIClient) {
         self.api = api
@@ -158,6 +165,35 @@ final class RemoteMessagingBackend: MessagingBackend {
     func setAutomationPaused(_ paused: Bool) async throws {
         let body = try APIClient.encoder.encode(AutomationResponse(paused: paused))
         _ = try await api.send("PUT", "v1/automation", body: body)
+    }
+}
+
+extension RemoteMessagingBackend {
+    private struct ConnectResponse: Decodable { let authorizeUrl: String }
+    private struct SyncResponse: Decodable { let friends: Int; let messages: Int }
+    private struct DisconnectBody: Encodable { let deleteMessages: Bool }
+    private struct EmptyBody: Encodable {}
+
+    func loadInstagramStatus() async throws -> InstagramStatus? {
+        try await apiClient.get("v1/instagram/status")
+    }
+
+    func instagramAuthorizeURL() async throws -> URL {
+        let response: ConnectResponse = try await apiClient.post("v1/instagram/connect", body: EmptyBody())
+        guard let url = URL(string: response.authorizeUrl) else {
+            throw APIError.decoding("bad authorize URL")
+        }
+        return url
+    }
+
+    func syncInstagram() async throws -> Int {
+        let response: SyncResponse = try await apiClient.post("v1/instagram/sync", body: EmptyBody())
+        return response.messages
+    }
+
+    func disconnectInstagram(deleteMessages: Bool) async throws {
+        let _: InstagramStatus = try await apiClient.post("v1/instagram/disconnect",
+                                                         body: DisconnectBody(deleteMessages: deleteMessages))
     }
 }
 
@@ -315,6 +351,16 @@ final class MockMessagingBackend: MessagingBackend {
     func loadAutomationPaused() async throws -> Bool? { nil }
 
     func setAutomationPaused(_ paused: Bool) async throws { self.paused = paused }
+
+    func loadInstagramStatus() async throws -> InstagramStatus? { nil }
+
+    func instagramAuthorizeURL() async throws -> URL {
+        throw APIError.server(status: 409, message: "Connect your backend first (Settings → AI & backend).")
+    }
+
+    func syncInstagram() async throws -> Int { 0 }
+
+    func disconnectInstagram(deleteMessages: Bool) async throws {}
 
     // MARK: Helpers
 

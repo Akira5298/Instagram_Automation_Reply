@@ -103,7 +103,7 @@ struct BackendSettingsSection: View {
                 .accessibilityElement(children: .combine)
             }
 
-            if app.connectionMode.isBackend {
+            if app.connectionMode.isBackend && app.messagingStore.usesMockInstagram {
                 Button {
                     Task {
                         isSeeding = true

@@ -73,6 +73,7 @@ class WorkerStats:
     failed: int = 0
     cancelled: int = 0
     notifications: int = 0
+    webhooks: int = 0
 
 
 class Worker:
@@ -85,6 +86,8 @@ class Worker:
         settings: Settings,
         notifier: NotificationSender | None = None,
         clock: Callable[[], datetime] | None = None,
+        webhooks: Any = None,
+        instagram: Any = None,
         worker_id: str | None = None,
         lease: timedelta = timedelta(minutes=5),
     ) -> None:
@@ -96,6 +99,9 @@ class Worker:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.worker_id = worker_id or f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
         self.lease = lease
+        self.webhooks = webhooks          # WebhookProcessor (Phase 4)
+        self.instagram = instagram        # InstagramService, for token refresh
+        self._last_maintenance: datetime | None = None
 
     # ------------------------------------------------------------------ loop
 
@@ -104,7 +110,7 @@ class Worker:
         while not stop.is_set():
             try:
                 stats = await self.run_once()
-                if stats.processed or stats.materialized or stats.recovered:
+                if stats.processed or stats.materialized or stats.recovered or stats.webhooks:
                     log.info("worker tick", extra={"fields": stats.__dict__})
             except Exception:
                 log.exception("worker tick failed")
@@ -116,6 +122,9 @@ class Worker:
     async def run_once(self) -> WorkerStats:
         stats = WorkerStats()
         now = self.clock()
+        if self.webhooks is not None:
+            stats.webhooks = await self.webhooks.process_pending()
+        await self._maintenance(now)
         await self._recover_expired_leases(now, stats)
         await self._materialize_due_jobs(now, stats)
         for run_id in await self._claim_runs(now):
@@ -128,6 +137,20 @@ class Worker:
         async with self.pool.connection() as conn:
             stats.notifications = await dispatch_pending(conn, self.notifier)
         return stats
+
+    async def _maintenance(self, now: datetime) -> None:
+        """Hourly: refresh expiring Instagram tokens; purge old message text."""
+        if self._last_maintenance and now - self._last_maintenance < timedelta(hours=1):
+            return
+        self._last_maintenance = now
+        try:
+            if self.instagram is not None:
+                await self.instagram.refresh_expiring_tokens(self.pool)
+            async with self.pool.connection() as conn:
+                await messaging_repo.purge_old_content(
+                    conn, now - timedelta(days=self.settings.message_retention_days))
+        except Exception:
+            log.exception("maintenance failed")
 
     # ------------------------------------------------------- materialise
 

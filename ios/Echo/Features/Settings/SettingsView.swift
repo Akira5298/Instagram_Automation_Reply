@@ -36,20 +36,7 @@ struct SettingsView: View {
                     .listRowBackground(EchoColor.surface.opacity(0.7))
 
                     // MARK: Instagram
-                    Section("Instagram") {
-                        LabeledContent("Account") {
-                            Text("Not connected").foregroundStyle(EchoColor.textTertiary)
-                        }
-                        Button {
-                        } label: {
-                            Label("Connect Instagram professional account", systemImage: "link")
-                        }
-                        .disabled(true)
-                        Text("Available in Phase 4. Requires an Instagram Business or Creator account and Meta's official Instagram Login.")
-                            .font(EchoFont.caption)
-                            .foregroundStyle(EchoColor.textTertiary)
-                    }
-                    .listRowBackground(EchoColor.surface.opacity(0.7))
+                    InstagramSettingsSection(app: app)
 
                     // MARK: AI / backend
                     BackendSettingsSection(app: app)

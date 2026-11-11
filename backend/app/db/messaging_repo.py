@@ -17,13 +17,31 @@ FRIEND_COLUMNS = """
 """
 
 
+ACCOUNT_COLUMNS = """
+    id, user_id, ig_user_id, username, account_type, provider, status, token_expires_at,
+    webhook_subscribed_at, last_webhook_at, last_synced_at, last_error, connected_at
+"""
+
+
 async def get_account(conn: AsyncConnection, user_id: UUID) -> dict[str, Any] | None:
+    """The account messages go out from: the active one, else the latest."""
     cur = await conn.execute(
-        """
-        select id, ig_user_id, username, provider, status from instagram_accounts
-        where user_id = %s order by connected_at desc limit 1
+        f"""
+        select {ACCOUNT_COLUMNS} from instagram_accounts
+        where user_id = %s order by (status = 'active') desc, connected_at desc limit 1
         """,
         (user_id,),
+    )
+    return await cur.fetchone()
+
+
+async def get_active_account(conn: AsyncConnection, user_id: UUID) -> dict[str, Any] | None:
+    return await get_account(conn, user_id)
+
+
+async def account_by_ig_id(conn: AsyncConnection, ig_user_id: str) -> dict[str, Any] | None:
+    cur = await conn.execute(
+        f"select {ACCOUNT_COLUMNS} from instagram_accounts where ig_user_id = %s", (ig_user_id,)
     )
     return await cur.fetchone()
 
@@ -34,7 +52,7 @@ async def ensure_mock_account(conn: AsyncConnection, user_id: UUID) -> dict[str,
         insert into instagram_accounts (user_id, ig_user_id, username, account_type, provider, status)
         values (%s, %s, 'echo_mock', 'MEDIA_CREATOR', 'mock', 'active')
         on conflict (ig_user_id) do update set status = 'active'
-        returning id, ig_user_id, username, provider, status
+        returning id, user_id, ig_user_id, username, provider, status
         """,
         (user_id, f"mock-{user_id}"),
     )
@@ -44,8 +62,15 @@ async def ensure_mock_account(conn: AsyncConnection, user_id: UUID) -> dict[str,
 
 
 async def list_friends(conn: AsyncConnection, user_id: UUID) -> list[dict[str, Any]]:
+    """Friends on your currently active Instagram account (real or mock)."""
     cur = await conn.execute(
-        f"select {FRIEND_COLUMNS} from friends f where f.user_id = %s order by f.display_name", (user_id,)
+        f"""
+        select {FRIEND_COLUMNS} from friends f
+        join instagram_accounts a on a.id = f.instagram_account_id and a.status = 'active'
+        where f.user_id = %s
+        order by f.last_inbound_message_at desc nulls last, f.display_name
+        """,
+        (user_id,),
     )
     return await cur.fetchall()
 
@@ -133,7 +158,8 @@ async def record_outbound(
         """
         insert into ig_messages (user_id, friend_id, direction, ig_message_id, content, sent_by, platform_time)
         values (%s, %s, 'outbound', %s, %s, %s, %s)
-        on conflict (ig_message_id) do nothing
+        on conflict (ig_message_id) do update set sent_by = excluded.sent_by
+            where ig_messages.sent_by = 'user_manual' and excluded.sent_by in ('echo_auto', 'echo_scheduled')
         """,
         (user_id, friend_id, mid, text, sent_by, at),
     )
@@ -168,3 +194,20 @@ SENDER_FOR_APP = {
     "echo_auto": "echo_auto",
     "echo_scheduled": "echo_scheduled",
 }
+
+
+async def mark_deleted(conn: AsyncConnection, mid: str) -> None:
+    await conn.execute("update ig_messages set content = null, is_deleted = true where ig_message_id = %s", (mid,))
+
+
+async def message_exists(conn: AsyncConnection, mid: str) -> bool:
+    cur = await conn.execute("select 1 from ig_messages where ig_message_id = %s", (mid,))
+    return await cur.fetchone() is not None
+
+
+async def purge_old_content(conn: AsyncConnection, older_than) -> int:
+    """Minimise retention: drop message text past the retention period."""
+    cur = await conn.execute(
+        "update ig_messages set content = null where content is not null and platform_time < %s", (older_than,)
+    )
+    return cur.rowcount

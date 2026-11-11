@@ -73,9 +73,10 @@ def make_client():
 
     clients: list[TestClient] = []
 
-    def _make(provider=None, messaging=None, run_worker=False, **settings_overrides) -> TestClient:
+    def _make(provider=None, messaging=None, run_worker=False, instagram_service=None,
+              **settings_overrides) -> TestClient:
         app = create_app(settings=make_settings(**settings_overrides), provider=provider,
-                         messaging=messaging, run_worker=run_worker)
+                         messaging=messaging, run_worker=run_worker, instagram_service=instagram_service)
         client = TestClient(app)
         client.__enter__()
         clients.append(client)

@@ -451,6 +451,23 @@ final class BackendContractTests: XCTestCase {
                        ServerDate.parse("2026-11-12T20:00:00+08:00")?.timeIntervalSince1970)
     }
 
+    func testInstagramStatusDecodes() throws {
+        let json = """
+        {"connected":true,"provider":"instagram","configured":true,"mock_account":false,"username":"my.creator",
+         "account_type":"MEDIA_CREATOR","status":"active","token_expires_at":"2027-01-10T05:00:00.123456+00:00",
+         "webhooks_subscribed":true,"last_webhook_at":null,"last_synced_at":null,"last_error":null}
+        """
+        let status: InstagramStatus = try JSONDecoderBox.decode(Data(json.utf8))
+        XCTAssertTrue(status.connected)
+        XCTAssertEqual(status.accountTypeTitle, "Creator")
+        XCTAssertFalse(status.usesMockInstagram)
+        XCTAssertNotNil(status.tokenExpiresAt)
+
+        let notConfigured: InstagramStatus = try JSONDecoderBox.decode(Data(
+            #"{"connected":false,"configured":false,"provider":"mock","mock_account":true}"#.utf8))
+        XCTAssertTrue(notConfigured.usesMockInstagram)
+    }
+
     func testConnectionModeResolution() {
         var settings = AppSettings()
         XCTAssertEqual(AppModel.resolveMode(settings: settings, token: "t"), .mock)

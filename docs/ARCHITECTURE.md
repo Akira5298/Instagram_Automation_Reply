@@ -1,6 +1,6 @@
 # ECHO — Architecture Overview
 
-*Updated for Phase 3 · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
+*Updated for Phase 4 · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
 
 ## 1. The short version
 
@@ -165,6 +165,28 @@ Supporting pieces:
   The app shows a confirmation card. Anything ambiguous becomes a `schedule_failed` card instead of a guess.
 - **"Send anyway"** (approving a paused draft) skips only the safety gate. The Meta eligibility check still applies.
 
+### 3.3b Instagram integration — as implemented in Phase 4
+
+- **Login.** The app calls `POST /v1/instagram/connect` and gets back an `instagram.com/oauth/authorize` URL carrying a single-use `state` that expires after 15 minutes. It opens the URL in `ASWebAuthenticationSession`. Instagram redirects to `/v1/instagram/oauth/callback`, where the server:
+  1. checks the state
+  2. exchanges the code for a short-lived token (`api.instagram.com/oauth/access_token`)
+  3. exchanges that for a long-lived token, about 60 days (`graph.instagram.com/access_token`, `ig_exchange_token`)
+  4. reads `/me` and rejects personal accounts and missing messaging permission
+  5. encrypts the token with AES-256-GCM
+  6. retires other accounts, including the Phase 3 mock
+  7. subscribes webhooks (`/me/subscribed_apps?subscribed_fields=messages`)
+  8. redirects to `echo://instagram/connected?status=…`, which closes the sheet
+- **Tokens** are refreshed hourly by the worker when fewer than 10 days remain (`refresh_access_token`). A Graph error 190 marks the account `expired` and sends a `connection_error` notification.
+- **Webhooks.** The signature is checked over the raw bytes, then each messaging event is stored in `webhook_events` keyed `ig:<mid>:<msg|echo|deleted>`, which absorbs Meta's retries. The worker processes them (see the README flow). New friends are created with **AI off and consent unknown**. Message text is purged after `MESSAGE_RETENTION_DAYS`.
+- **Sending** (`InstagramMessagingProvider`):
+  - Sends are paced per account.
+  - Connection failures, 5xx responses and rate-limit codes are transient.
+  - An outside-window error, an invalid token or other 4xx errors are permanent.
+  - A timeout after the request was written means the outcome is unknown, and ECHO never retries it.
+  - The returned `message_id` is stored. When the echo webhook with that mid arrives, it is ignored (loop guard).
+- **Meta compliance endpoints:** deauthorize callback (revokes and wipes the token), data-deletion callback (deletes the account's friends, messages, jobs and webhook events, and returns a status URL and confirmation code) and `/privacy`.
+- **Access level reality:** see `docs/META_SETUP.md` §5. Standard Access covers your own account. Webhooks need the app to be Live. Messages from people without an app role need Advanced Access (App Review and Business Verification).
+
 ### 3.4 Job-run state machine
 
 ```
@@ -249,6 +271,6 @@ Sources:
 | 1 | Architecture, schema, design system, 5 screens, mock chat, backend skeleton | ✅ |
 | 2 | Claude via FastAPI, chat persistence, profile learning and memory, writing examples, Keychain token, mock ↔ backend switch | ✅ |
 | 3 | Scheduler: jobs/friends/automation APIs, durable worker, DST-safe RRULE, safety + eligibility gates, mock messaging provider, activity feed, chat-created jobs | ✅ |
-| 4 | Meta app setup, Instagram Login, webhooks, test DMs, App Review submission | next |
-| 5 | Autonomous replies, friend controls, consent and safety gates end to end | |
+| 4 | Instagram Login (OAuth), encrypted tokens + refresh, signed webhooks → inbound/echo processing, Graph API delivery, conversation sync, deauthorize/data-deletion callbacks, privacy page, Meta setup + App Review guide | ✅ |
+| 5 | Autonomous replies, friend controls, consent and safety gates end to end | next |
 | 6 | Polish, APNs push delivery, security review, deploy, TestFlight (optional: Sign in with Apple) | |

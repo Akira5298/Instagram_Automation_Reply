@@ -47,16 +47,40 @@ class Settings(BaseSettings):
 
     # --- Scheduler / worker -----------------------------------------------------
     # "mock" delivers into the database only (no Instagram). Phase 4 adds "instagram".
-    echo_messaging_provider: Literal["mock"] = "mock"
+    echo_messaging_provider: Literal["mock", "instagram"] = "mock"
     # Run the worker inside the API process (simplest single-service deploy).
     # Set false and run `python -m app.worker` separately to scale them apart.
     echo_run_worker: bool = True
     worker_interval_seconds: float = 5.0
     worker_batch_size: int = 10
 
-    # --- Meta (Phase 4) ---------------------------------------------------------
-    meta_app_secret: SecretStr | None = None
+    # --- Meta / Instagram (Phase 4) ----------------------------------------------
+    # From App Dashboard → Instagram → API setup with Instagram login →
+    # "Business login settings": the *Instagram* app ID and app secret.
+    meta_instagram_app_id: str | None = None
+    meta_app_secret: SecretStr | None = None          # Instagram app secret (also signs webhooks)
     meta_webhook_verify_token: SecretStr | None = None
+    meta_graph_version: str = "v26.0"
+    # Public https URL of this backend, e.g. https://echo-production.up.railway.app
+    echo_public_base_url: str | None = None
+    # Where Instagram sends people after login; must be listed in the dashboard
+    # exactly. Defaults to {echo_public_base_url}/v1/instagram/oauth/callback.
+    meta_oauth_redirect_uri: str | None = None
+    # 32-byte key (base64) used to encrypt Instagram tokens at rest. Generate:
+    #   python3 -c "import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+    echo_token_encryption_key: SecretStr | None = None
+    # Seconds between sends per Instagram account (conservative pacing).
+    instagram_min_send_interval: float = 1.0
+    # Friends' message text is wiped after this many days (metadata kept).
+    message_retention_days: int = 30
+
+    @property
+    def oauth_redirect_uri(self) -> str | None:
+        if self.meta_oauth_redirect_uri:
+            return self.meta_oauth_redirect_uri
+        if self.echo_public_base_url:
+            return self.echo_public_base_url.rstrip("/") + "/v1/instagram/oauth/callback"
+        return None
 
     default_timezone: str = "Asia/Kuala_Lumpur"
 

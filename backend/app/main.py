@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.ai.mock_provider import MockAIProvider
 from app.ai.provider import AIError, AIProvider, AIRateLimited
-from app.api import chat, dev, friends, health, jobs, profile, webhooks
+from app.api import chat, dev, friends, health, instagram, jobs, profile, webhooks
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.pool import create_pool, ensure_owner
@@ -27,8 +27,24 @@ def build_provider(settings: Settings) -> AIProvider:
     return MockAIProvider()
 
 
-def build_messaging(settings: Settings) -> MessagingProvider:
-    # Phase 4 adds the Instagram Graph API provider here.
+def build_instagram(settings: Settings):
+    """InstagramService when Meta credentials are configured, else None."""
+    from app.services.instagram_service import InstagramNotConfigured, InstagramService, make_cipher, make_client
+
+    try:
+        return InstagramService(settings=settings, client=make_client(settings), cipher=make_cipher(settings))
+    except InstagramNotConfigured:
+        return None
+
+
+def build_messaging(settings: Settings, pool=None, instagram=None) -> MessagingProvider:
+    if settings.echo_messaging_provider == "instagram":
+        if pool is None or instagram is None:
+            raise RuntimeError("ECHO_MESSAGING_PROVIDER=instagram needs DATABASE_URL and the META_* settings")
+        from app.messaging.instagram_provider import InstagramMessagingProvider
+
+        return InstagramMessagingProvider(pool=pool, service=instagram,
+                                          min_interval=settings.instagram_min_send_interval)
     return MockMessagingProvider()
 
 
@@ -37,6 +53,7 @@ def create_app(
     provider: AIProvider | None = None,
     messaging: MessagingProvider | None = None,
     run_worker: bool | None = None,
+    instagram_service=None,
 ) -> FastAPI:
     configure_logging()
     settings = settings or get_settings()
@@ -45,7 +62,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.ai_provider = provider or build_provider(settings)
-        app.state.messaging = messaging or build_messaging(settings)
+        app.state.instagram = instagram_service if instagram_service is not None else build_instagram(settings)
+        app.state.messaging = messaging
         app.state.pool = None
         app.state.worker = None
         stop = asyncio.Event()
@@ -55,13 +73,20 @@ def create_app(
             await pool.open(wait=True, timeout=15)
             await ensure_owner(pool, settings.echo_owner_user_id, settings.default_timezone)
             app.state.pool = pool
+            from app.services.webhook_service import WebhookProcessor
             from app.worker.runner import Worker
 
-            app.state.worker = Worker(pool=pool, ai=app.state.ai_provider, messaging=app.state.messaging,
-                                      settings=settings)
+            if app.state.messaging is None:
+                app.state.messaging = build_messaging(settings, pool, app.state.instagram)
+            app.state.worker = Worker(
+                pool=pool, ai=app.state.ai_provider, messaging=app.state.messaging, settings=settings,
+                webhooks=WebhookProcessor(pool=pool, instagram=app.state.instagram),
+                instagram=app.state.instagram,
+            )
             if start_worker:
                 worker_task = asyncio.create_task(app.state.worker.run_forever(stop))
         else:
+            app.state.messaging = app.state.messaging or MockMessagingProvider()
             log.warning("DATABASE_URL not set — chat and profile endpoints will return 503")
         try:
             yield
@@ -71,8 +96,10 @@ def create_app(
                 await worker_task
             if app.state.pool is not None:
                 await app.state.pool.close()
+            if app.state.instagram is not None:
+                await app.state.instagram.client.aclose()
 
-    app = FastAPI(title="ECHO backend", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="ECHO backend", version="0.4.0", lifespan=lifespan)
     app.dependency_overrides[get_settings] = lambda: settings
 
     @app.middleware("http")
@@ -93,6 +120,8 @@ def create_app(
     app.include_router(jobs.router)
     app.include_router(friends.router)
     app.include_router(dev.router)
+    app.include_router(instagram.router)
+    app.include_router(instagram.public_router)
     app.include_router(webhooks.router)
     return app
 

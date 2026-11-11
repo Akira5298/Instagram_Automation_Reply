@@ -71,6 +71,7 @@ struct ConversationDetailView: View {
         }
         .navigationTitle(friend.displayName)
         .toolbar {
+            if store.usesMockInstagram {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button("Simulate a message from \(friend.firstName)", systemImage: "arrow.down.message") {
@@ -80,6 +81,7 @@ struct ConversationDetailView: View {
                     Image(systemName: "testtube.2")
                 }
                 .accessibilityLabel("Testing tools")
+            }
             }
         }
     }

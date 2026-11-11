@@ -1,141 +1,93 @@
 # ECHO — AI personal messaging assistant (iOS)
 
-**Phase 3: Scheduler.** Scheduled messages now run on your server. A database-backed worker turns each schedule into timed runs. For every run it writes the message in your voice with Claude, applies a safety gate, and checks Instagram's rules right before sending. Delivery goes through a **mock Instagram** provider until Phase 4.
+**Phase 4: real Instagram.** ECHO now connects to your Instagram Creator/Business account through Meta's official *Instagram API with Instagram Login*:
 
-Every attempt is recorded as sent, blocked, needs attention or failed, and you get an activity notice for each. You can also create jobs from AI Chat ("Send Kenji a message at 8 PM tomorrow asking if he's free").
+- **Login:** a secure browser sheet runs Business Login for Instagram. Tokens are encrypted on your server and never stored on the phone.
+- **Receiving:** your DMs arrive by signed webhook, are stored once (deduplicated), and open each friend's 24-hour window.
+- **Sending:** scheduled messages go out through the Graph API. ECHO paces sends and maps Instagram's errors to retry, fail, or "outcome unknown".
+- **Echoes:** messages ECHO sent are recognised when Instagram echoes them back, so ECHO never reacts to itself. Replies you type in the Instagram app are recorded as yours.
+- **Maintenance:** tokens refresh automatically, message text is purged after 30 days, and Meta's deauthorize and data-deletion callbacks plus a privacy page are built in.
 
-Design: `docs/ARCHITECTURE.md` (see §3.3–3.5 for the scheduler).
+New people who DM you always start with **AI replies off and consent "Not asked"**. Automatic replies to incoming messages arrive in Phase 5.
+
+➡️ **Start with [`docs/META_SETUP.md`](docs/META_SETUP.md)**: Meta app, webhooks, testing, App Review and deploying to Railway.
+
+## Upgrade from Phase 3
+
+1. **Run the new migration.** Supabase SQL Editor, or:
+   ```bash
+   psql echo -f backend/supabase/migrations/0004_instagram.sql
+   ```
+2. **Update packages.** This adds `cryptography` and `python-multipart`.
+   ```bash
+   pip install -r backend/requirements.txt
+   ```
+3. **Get an https URL.** Meta requires https for both login and webhooks. Deploy to Railway (META_SETUP §6) or use a tunnel (`cloudflared tunnel --url http://localhost:8000`).
+4. **Create the Meta app and fill in the `META_*` and `ECHO_*` settings.** Follow META_SETUP §1–4. Then set `ECHO_MESSAGING_PROVIDER=instagram`.
+5. **Restart the server.** `/health` should report `"version": "0.4.0"`.
+6. **Rebuild the app** (`cd ios && xcodegen generate`, then ⌘R). In the app:
+   - Set **Settings → AI & backend → Backend URL** to the https URL.
+   - Tap **Settings → Instagram → Connect Instagram**.
+
+To keep testing without Instagram, leave `ECHO_MESSAGING_PROVIDER=mock`. Everything from Phase 3 still works.
+
+## What happens to a DM now
+
+```
+Friend sends DM ─▶ Meta webhook (X-Hub-Signature-256 verified) ─▶ webhook_events (unique per mid) ─▶ 200 OK
+                                                                        │ worker, a few seconds later
+      ┌─────────────────────────────────────────────────────────────────┘
+      ├─ is_self / reactions / seen      → ignored
+      ├─ is_deleted                      → text removed
+      ├─ is_echo of ECHO's own send      → ignored (loop guard: mid already stored)
+      ├─ is_echo you typed in Instagram  → stored as "me"
+      └─ inbound                         → friend found or created (name via User Profile API,
+                                           AI off, consent unknown), message stored, 24h window opened
+```
+
+Scheduled sends still pass, at dispatch time, the safety gate and the deterministic eligibility check: 24-hour window, consent, per-friend toggle, emergency pause and account status. The send then goes to `POST graph.instagram.com/v26.0/<IG_ID>/messages`.
+
+## Backend layout (new in Phase 4)
 
 ```
 backend/app/
-├── worker/runner.py           # the worker: materialise → claim → draft → gates → send → notify
-├── worker/__main__.py         # `python -m app.worker` (optional separate process)
-├── domain/recurrence.py       # IANA timezone + DST-safe RRULE engine
-├── domain/safety.py           # deterministic money/commitment/sensitive/emotional gate
-├── domain/messaging_window.py # Meta 24h / consent / pause eligibility (unchanged)
-├── messaging/provider.py      # MessagingProvider + MockMessagingProvider (failure simulation)
-├── services/scheduler_service.py, services/notifications.py
-├── api/jobs.py · friends.py · dev.py
-└── supabase/migrations/0003_scheduler.sql
-ios/Echo/
-├── Services/MessagingBackend.swift   # Remote (your server) + Mock (offline) backends
-├── Services/MessagingStore.swift     # observable friends / jobs / activity
-└── Features/Scheduler/               # timeline, JobDetailSheet (history, approve, copy), ActivitySheet
+├── integrations/meta/instagram_client.py  # OAuth, token exchange/refresh, me, subscribe, send, profile, conversations
+├── integrations/meta/signed_request.py    # Meta deauthorize / data-deletion signatures
+├── core/crypto.py                         # AES-256-GCM token encryption
+├── services/instagram_service.py          # connect, status, refresh, sync, friend creation
+├── services/webhook_service.py            # ingest + process webhooks (worker)
+├── messaging/instagram_provider.py        # real delivery, error mapping, pacing
+├── api/instagram.py                       # /v1/instagram/* + /privacy
+├── Procfile, .python-version              # Railway / Render
+└── supabase/migrations/0004_instagram.sql
+ios/Echo/Features/Settings/InstagramSettingsSection.swift   # ASWebAuthenticationSession login
 ```
-
-## Upgrade from Phase 2 (5 minutes)
-
-1. **Apply the new migration.** Your Phase 2 database needs it.
-   - Local PostgreSQL:
-     ```bash
-     psql echo -f backend/supabase/migrations/0003_scheduler.sql
-     ```
-   - Supabase: in **SQL Editor**, paste and run `0003_scheduler.sql`.
-2. **Update the backend's Python packages.** This adds `python-dateutil` and `tzdata`.
-   ```bash
-   cd backend && source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. **Add the scheduler settings to `.env`** (the defaults shown are fine):
-   ```bash
-   ECHO_ENV=development            # enables the mock-Instagram dev tools
-   ECHO_MESSAGING_PROVIDER=mock
-   ECHO_RUN_WORKER=true            # worker runs inside the API process
-   ```
-4. **Restart the server.**
-   ```bash
-   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-   ```
-   - `/health` should now report `"version": "0.3.0"`.
-   - The log should show `worker started`.
-5. **Rebuild the app.**
-   ```bash
-   cd ios && xcodegen generate
-   ```
-   Then press ⌘R in Xcode.
-
-### First, check that Claude really works
-
-You haven't made a real Claude request yet, so do that before testing the scheduler. Make sure `ECHO_AI_PROVIDER=anthropic` is set, then run:
-
-```bash
-curl -s -X POST localhost:8000/v1/chat/messages \
-  -H "Authorization: Bearer $ECHO_API_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"client_msg_id\":\"$(uuidgen)\",\"text\":\"hey! ngl I love bouldering\"}"
-```
-
-You should get a natural reply. It shouldn't start with `[mock]`, and it should include a `memory_updates` list.
-
-If it fails, `detail` explains why: a bad API key, a rate limit, or a model the account can't use. Paste the server log line here and I'll sort it out.
-
-## Try the scheduler
-
-**In the app:** go to Settings → AI & backend → **Load sample friends (mock Instagram)**. This creates four friends on your server:
-
-| Friend | Setup | What happens to a message for them |
-|---|---|---|
-| **Kenji** | Consent granted, messaged you 2 hours ago | Sends |
-| **Giulia** | Consent only requested, last message 30 hours ago | **Blocked** (no consent, outside the 24-hour window) |
-| **Mei** | AI replies off, consent not asked | **Blocked** (automation off for this friend, no consent) |
-| **Daniel** | Consent not asked, last message 3 days ago | **Blocked** (no consent, outside the 24-hour window) |
-
-Things to try:
-
-1. **Create a job.** In Scheduler, tap **+**, pick Kenji, set a time 2 minutes from now and an instruction, then wait. The job turns **Sent**, and the message appears in Messages → Kenji marked "Scheduled by ECHO". The first message is preceded by the AI disclosure.
-2. **Test without waiting.** Touch and hold any job → **Run now (test)**. It goes through exactly the same checks.
-3. **See a block.** Schedule a message for Giulia. It's **Blocked**, and the card explains why. Tap the card for the delivery history, then **Copy draft** → **Open Instagram**.
-4. **Unblock it.**
-   - In Messages → Giulia, tap 🧪 → **Simulate a message from Giulia**. This opens the 24-hour window.
-   - Set Consent to **They agreed**.
-   - Run the job again. It sends.
-5. **Hit the safety gate.** Use the instruction "remind him he owes me RM20". The job goes to **Review**. Open it, then **Send anyway** or **Dismiss**.
-6. **Pause everything.** Tap **Pause all** in Messages. Every send is blocked, and ECHO doesn't spend any Claude tokens on drafts.
-7. **Schedule from chat.** In AI Chat, say *"Send Kenji a casual message at 8 PM tomorrow asking whether he's free this weekend."* A confirmation card appears under the reply. Tap it to open the Scheduler.
-8. **Check the activity feed.** The 🔔 in the Scheduler shows sent, blocked and failed events.
-
-**Simulate Instagram failures** from the terminal (development only):
-
-```bash
-curl -X PUT localhost:8000/v1/dev/mock-provider -H "Authorization: Bearer $ECHO_API_TOKEN" \
-  -H "Content-Type: application/json" -d '{"mode":"transient_once"}'   # or permanent | unknown | none
-```
-
-- `transient_once` retries with backoff and then sends.
-- `permanent` fails and notifies you.
-- `unknown` fails and is **never** retried, to avoid sending a duplicate.
 
 ## Tests
 
 ```bash
 cd backend
-ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test pytest -q   # 103 passed
+ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test pytest -q   # 121 passed
 ```
 
-The suite includes:
-- DST and timezone recurrence, including New York's spring-forward gap and fall-back repeat
-- every worker outcome, with a controllable clock
-- crash recovery
-- two workers racing without double-sending
-- skipping missed occurrences after downtime
-- end-to-end API flows, including chat-created jobs
+Phase 4 tests run against a **fake Graph API** (`tests/fake_graph.py`). They cover:
+- the full login: state, code exchange, long-lived token, account type and permission checks, encrypted storage, webhook subscription
+- duplicate webhooks
+- the echo loop guard
+- deleted messages
+- conversation sync
+- token refresh
+- Graph errors mapped to retry, fail, or expired login
+- the deletion and deauthorize callbacks
 
-In Xcode, ⌘U runs 26 tests, including decoding the backend's job, conversation and chat-action JSON.
+iOS: ⌘U runs 27 tests.
 
-## Running the worker separately (optional)
+Nothing here has run against the real Instagram API yet. That happens when you complete META_SETUP. If the real API behaves differently, send me the server log line (it includes Meta's error code and message) and I'll adjust.
 
-By default the worker runs inside the API process, which suits a single Railway or Render service. To scale them separately:
-1. Set `ECHO_RUN_WORKER=false` on the API.
-2. Run `python -m app.worker` as a second service.
+## Earlier phases
 
-Several workers can run at once safely: claims use `FOR UPDATE SKIP LOCKED`, and every send has an idempotency key.
+- **Phase 1:** design system, five screens, schema.
+- **Phase 2:** Claude chat and personality memory.
+- **Phase 3:** scheduler worker, recurrence, safety and eligibility gates, activity feed.
 
-## What's real vs. mock after Phase 3
-
-| Piece | Status |
-|---|---|
-| Claude chat, memory, summaries (Phase 2) | Real |
-| Scheduling: timezones, recurrence, worker, retries, crash recovery | **Real** |
-| Eligibility (24h window, consent, pause), safety gate, AI disclosure | **Real**, enforced by code |
-| Activity feed / notification outbox | **Real** (push delivery in Phase 6) |
-| Instagram delivery | **Mock** provider (Phase 4: Graph API) |
-| Friends & conversations | Seeded sample data on your server (Phase 4: real Instagram DMs) |
+The Phase 2 and 3 setup notes are in `docs/ARCHITECTURE.md` §3 and §8.

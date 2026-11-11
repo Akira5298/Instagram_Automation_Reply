@@ -14,7 +14,8 @@ import signal
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.pool import create_pool, ensure_owner
-from app.main import build_messaging, build_provider
+from app.main import build_instagram, build_messaging, build_provider
+from app.services.webhook_service import WebhookProcessor
 from app.worker.runner import Worker
 
 
@@ -30,7 +31,11 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    worker = Worker(pool=pool, ai=build_provider(settings), messaging=build_messaging(settings), settings=settings)
+    instagram = build_instagram(settings)
+    worker = Worker(
+        pool=pool, ai=build_provider(settings), messaging=build_messaging(settings, pool, instagram),
+        settings=settings, webhooks=WebhookProcessor(pool=pool, instagram=instagram), instagram=instagram,
+    )
     try:
         await worker.run_forever(stop)
     finally:
