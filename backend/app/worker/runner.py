@@ -127,6 +127,8 @@ class Worker:
         self.webhooks = webhooks          # WebhookProcessor (Phase 4)
         self.instagram = instagram        # InstagramService, for token refresh
         self._last_maintenance: datetime | None = None
+        self._next_poll: datetime | None = None
+        self._poll_backoff = 1
         from app.worker.auto_reply import AutoReplyProcessor
 
         self.auto_replies = AutoReplyProcessor(
@@ -157,6 +159,7 @@ class Worker:
         if self.webhooks is not None:
             stats.webhooks = await self.webhooks.process_pending()
         await self._maintenance(now)
+        await self._poll_instagram(now)
         replies = await self.auto_replies.run(self.clock())
         stats.replies_sent, stats.replies_held = replies.sent, replies.held
         stats.replies_skipped, stats.replies_blocked = replies.skipped, replies.blocked
@@ -190,6 +193,30 @@ class Worker:
                     conn, now - timedelta(days=self.settings.message_retention_days))
         except Exception:
             log.exception("maintenance failed")
+
+    async def _poll_instagram(self, now: datetime) -> None:
+        """Safety net for missed webhooks (Mac asleep, app not Live yet, Meta
+        hiccups): pull the 5 most recent threads every INSTAGRAM_POLL_SECONDS.
+        Backs off up to 10 minutes when Instagram says to slow down."""
+        interval = self.settings.instagram_poll_seconds
+        if (self.instagram is None or interval <= 0 or self.settings.echo_messaging_provider != "instagram"
+                or (self._next_poll and now < self._next_poll)):
+            return
+        from app.integrations.meta.instagram_client import GraphError
+
+        try:
+            found = await self.instagram.poll_all(self.pool)
+            self._poll_backoff = 1
+            if found:
+                log.info("instagram poll stored new messages", extra={"fields": {"messages": found}})
+        except GraphError as exc:
+            if exc.is_rate_limited:
+                self._poll_backoff = min(self._poll_backoff * 2, max(1, 600 // interval))
+            log.warning("instagram poll failed", extra={"fields": {"error": str(exc),
+                                                                    "backoff": self._poll_backoff}})
+        except Exception:
+            log.exception("instagram poll crashed")
+        self._next_poll = now + timedelta(seconds=interval * self._poll_backoff)
 
     # ------------------------------------------------------- materialise
 

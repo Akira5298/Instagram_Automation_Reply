@@ -63,12 +63,17 @@ struct InstagramSettingsSection: View {
             Text(status.webhooksSubscribed == true ? "Subscribed" : "Not subscribed")
                 .foregroundStyle(status.webhooksSubscribed == true ? EchoColor.success : EchoColor.warning)
         }
-        LabeledContent("Last message received") {
+        LabeledContent("Last webhook from Meta") {
             if let last = status.lastWebhookAt {
                 Text(last, format: .relative(presentation: .named))
             } else {
-                Text("None yet").foregroundStyle(EchoColor.textTertiary)
+                Text("None yet").foregroundStyle(EchoColor.warning)
             }
+        }
+        if status.lastWebhookAt == nil {
+            Text("Meta hasn't delivered any webhooks yet, so new DMs are picked up by ECHO's 30-second check instead of instantly. See docs/META_SETUP.md §5 and §7 (the app must be Live).")
+                .font(EchoFont.caption)
+                .foregroundStyle(EchoColor.textTertiary)
         }
         if let expires = status.tokenExpiresAt {
             LabeledContent(status.loginMode == "instagram" ? "Login renews by" : "Login expires") {
@@ -84,14 +89,14 @@ struct InstagramSettingsSection: View {
             Task {
                 isWorking = true
                 if let count = await store.syncInstagram() {
-                    message = "Synced \(count) recent messages."
+                    message = count == 0 ? "Up to date." : "Synced \(count) new messages."
                 }
                 await store.refreshInstagramStatus()
                 isWorking = false
             }
         } label: {
             HStack {
-                Label("Sync recent conversations", systemImage: "arrow.triangle.2.circlepath")
+                Label("Sync 5 latest chats now", systemImage: "arrow.triangle.2.circlepath")
                 Spacer()
                 if isWorking { ProgressView() }
             }

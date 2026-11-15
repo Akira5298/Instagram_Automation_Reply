@@ -145,6 +145,8 @@ struct ConversationSummary: Identifiable, Codable, Hashable, Sendable {
     var friend: Friend
     var messages: [InstagramMessage]
     var unreadCount: Int
+    /// What happened to the latest message ECHO considered answering (server only).
+    var lastAutoReply: AutoReplyOutcome? = nil
 
     var lastMessage: InstagramMessage? { messages.max { $0.sentAt < $1.sentAt } }
 
@@ -218,4 +220,40 @@ struct InstagramStatus: Codable, Hashable, Sendable {
         default: return accountType?.capitalized
         }
     }
+}
+
+
+/// Server's plain-words account of the latest automatic reply for a chat,
+/// e.g. "No reply: AI replies are off for this friend."
+struct AutoReplyOutcome: Codable, Hashable, Sendable {
+    let status: String
+    let reason: String?
+    let text: String
+    let at: Date
+
+    var systemImage: String {
+        switch status {
+        case "sent": return "checkmark.circle.fill"
+        case "pending", "running", "sending": return "clock"
+        case "needs_attention": return "exclamationmark.bubble.fill"
+        case "blocked", "failed": return "xmark.octagon"
+        default: return "minus.circle"
+        }
+    }
+
+    var tint: Color {
+        switch status {
+        case "sent": return EchoColor.success
+        case "pending", "running", "sending": return EchoColor.cyan
+        case "needs_attention": return EchoColor.warning
+        case "blocked", "failed": return EchoColor.danger
+        default: return EchoColor.textTertiary
+        }
+    }
+}
+
+/// `GET /v1/updates` long-poll answer.
+struct LiveUpdate: Decodable, Sendable {
+    let cursor: String
+    let changed: Bool
 }

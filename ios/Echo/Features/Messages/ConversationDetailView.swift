@@ -47,6 +47,19 @@ struct ConversationDetailView: View {
                     onOpenReviews: { showingReviews = true }
                 )
 
+                if friend.aiReplyEnabled, let outcome = conversation.lastAutoReply {
+                    HStack(alignment: .firstTextBaseline, spacing: EchoSpacing.xs) {
+                        Image(systemName: outcome.systemImage).foregroundStyle(outcome.tint)
+                        Text(outcome.text).foregroundStyle(EchoColor.textSecondary)
+                        Spacer(minLength: 0)
+                        Text(outcome.at, style: .relative).foregroundStyle(EchoColor.textTertiary)
+                    }
+                    .font(EchoFont.caption)
+                    .padding(.horizontal, EchoSpacing.xs)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Latest automatic reply: \(outcome.text)")
+                }
+
                 LazyVStack(spacing: EchoSpacing.xs) {
                     ForEach(conversation.messages.sorted { $0.sentAt < $1.sentAt }) { message in
                         InstagramBubble(message: message)

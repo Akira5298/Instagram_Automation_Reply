@@ -106,11 +106,17 @@ async def oauth_callback(
 @router.post("/sync")
 async def sync(user_id: UUID = Depends(require_user), conn: AsyncConnection = Depends(get_conn),
                service: InstagramService = Depends(get_instagram), settings: Settings = Depends(get_settings)):
+    """Pull the 5 most recent conversations now. New messages get the same
+    treatment as webhooks (automatic replies, takeover)."""
     try:
         return await service.sync_conversations(conn, user_id, settings.message_retention_days)
     except InstagramNotConfigured as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except GraphError as exc:
+        if exc.is_rate_limited:
+            raise HTTPException(status_code=429, detail=(
+                "Instagram asked ECHO to slow down. New messages still arrive automatically; "
+                "try Sync again in a few minutes.")) from exc
         raise HTTPException(status_code=502, detail=f"Instagram: {exc.message}") from exc
 
 

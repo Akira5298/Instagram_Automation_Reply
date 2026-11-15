@@ -46,6 +46,8 @@ protocol MessagingBackend {
     func loadInstagramStatus() async throws -> InstagramStatus?
     func instagramAuthorizeURL() async throws -> URL
     func syncInstagram() async throws -> Int
+    /// Waits up to ~25 s for anything to change on the server (long poll).
+    func waitForUpdates(since cursor: String?) async throws -> LiveUpdate
     func disconnectInstagram(deleteMessages: Bool) async throws
 }
 
@@ -267,6 +269,12 @@ extension RemoteMessagingBackend {
         return response.messages
     }
 
+    func waitForUpdates(since cursor: String?) async throws -> LiveUpdate {
+        var query = [URLQueryItem(name: "wait", value: "25")]
+        if let cursor { query.append(URLQueryItem(name: "since", value: cursor)) }
+        return try await apiClient.get("v1/updates", query: query)
+    }
+
     func disconnectInstagram(deleteMessages: Bool) async throws {
         let _: InstagramStatus = try await apiClient.post("v1/instagram/disconnect",
                                                          body: DisconnectBody(deleteMessages: deleteMessages))
@@ -452,6 +460,11 @@ final class MockMessagingBackend: MessagingBackend {
     }
 
     func syncInstagram() async throws -> Int { 0 }
+
+    func waitForUpdates(since cursor: String?) async throws -> LiveUpdate {
+        try await Task.sleep(for: .seconds(25))   // nothing changes on its own offline
+        return LiveUpdate(cursor: cursor ?? "mock", changed: false)
+    }
 
     func disconnectInstagram(deleteMessages: Bool) async throws {}
 

@@ -9,6 +9,8 @@ ECHO runs entirely on your Mac: **FastAPI (Python 3.12) + local PostgreSQL + Cla
 - **Holds drafts for you** when a message involves money, plans, commitments, something sensitive or emotional, a photo it can't see, or anything only you can answer. They go to the **Needs you** queue, where you edit, send or dismiss them. You can also set a friend to "check every reply with me".
 - **Consent by DM:** "Ask by DM" sends your consent request; a YES reply grants consent and STOP revokes it, recorded automatically with the message as evidence.
 - **Per-friend reply style:** tone, formality, emoji, length, topics to avoid, custom instructions.
+- **Live:** the app keeps one long-poll request open (`/v1/updates`, about 2 requests a minute), so new DMs, ECHO's replies and held drafts appear within a second or two, with no manual refresh.
+- **Safety net for missed webhooks:** every 30 s (`INSTAGRAM_POLL_SECONDS`) the server pulls your 5 latest chats. Anything new there is treated like a webhook, so unanswered messages still get replies.
 - **Disclosure:** the AI disclosure message goes out before the first automatic reply, and again after 30 days. Missed messages from while the Mac was off (over 2 hours old) are never answered late.
 
 **Phase 4 — real Instagram.**
@@ -70,7 +72,7 @@ Instagram_App/
 │   │   ├── worker/auto_reply.py      # Phase 5: automatic-reply pipeline (gates → Claude → send)
 │   │   └── api/                      # /v1/* , /webhooks/meta , /privacy
 │   ├── migrations/0001…0007.sql      # plain PostgreSQL
-│   ├── tests/                        # 148 tests (fake Graph API + real PostgreSQL)
+│   ├── tests/                        # 153 tests (fake Graph API + real PostgreSQL)
 │   └── .env.example
 ├── ios/                              # SwiftUI app (XcodeGen project.yml)
 └── docs/ARCHITECTURE.md, docs/META_SETUP.md
@@ -91,4 +93,4 @@ createdb echo_test   # disposable; tests wipe it
 ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test .venv/bin/python -m pytest -q
 ```
 
-The suite has 148 tests, including the automatic-reply pipeline end to end, the migration runner and tunnel URL resolution. iOS: ⌘U.
+The suite has 153 tests, including the automatic-reply pipeline end to end, the migration runner and tunnel URL resolution. iOS: ⌘U.

@@ -153,7 +153,7 @@ Connecting Instagram from the app also subscribes your account: `POST graph.face
    - **Select your Instagram professional account** and allow the permissions.
 
    You return to the app showing **@yourname**, with Webhooks: **Subscribed**.
-4. Tap **Sync recent conversations** to pull in recent threads. With Unified Login this calls `/{IG_ID}/conversations`, which Meta doesn't clearly document for this setup yet. If it fails, new messages still arrive through webhooks.
+4. New DMs appear on their own. Webhooks deliver them instantly. As a backup, the server checks your **5 latest chats every 30 seconds**, and **Sync 5 latest chats now** does the same on demand. Both use `/{IG_ID}/conversations`, which Meta doesn't clearly document for Unified Login yet. If Meta asks ECHO to slow down, the background check backs off on its own (up to 10 minutes).
 
 **How ECHO finds the shared account after login:**
 1. `GET /me/assigned_instagram_accounts`.
@@ -232,6 +232,9 @@ ECHO only works while the Mac is awake, online and running `./scripts/start.sh`.
 | "Messaging permission wasn't granted" | Add `instagram_manage_messages` to the login configuration (§4) and connect again |
 | "No Instagram account was shared with ECHO" | On Meta's screen, select your Instagram professional account; check the configuration's assets include Instagram accounts and the app is in your business portfolio |
 | A call fails with error 190 after working | The system-user token stopped (e.g. the app left the business portfolio) or a user-token config expired; connect again |
+| New DMs only appear after a sync, and **Settings → Instagram → Last webhook from Meta** says *None yet* | Meta isn't delivering webhooks: check §5 (callback URL = your current tunnel, `messages` subscribed), that the app is **Live**, that the sender has an app role, and "Allow access to messages". Meanwhile the 30-second check picks DMs up. |
+| ECHO doesn't auto-reply | Open the chat. The line under the controls says why: AI off, no consent, you replied recently ("taken over"), a held draft, the 24-hour window, or `ECHO_MESSAGING_PROVIDER=mock` (replies go nowhere). |
+| Sync says Instagram asked ECHO to slow down | Meta's rate limit; wait a few minutes. Sync now asks for only 5 chats × 10 messages. |
 | Dashboard test events arrive, real DMs don't | The app isn't Live, the sender has no app role (needs Advanced Access), or "Allow access to messages" is off |
 | DMs stopped arriving after the Mac slept | Meta unsubscribed the webhook; restart `start.sh` (it re-subscribes), then **Sync recent conversations** |
 | *Port 8000 is already in use* | Another `start.sh` is running; stop it, or set `ECHO_PORT=8001 ./scripts/start.sh` |

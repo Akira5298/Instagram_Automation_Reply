@@ -19,6 +19,7 @@ from app.api import (
     jobs,
     profile,
     reviews,
+    updates,
     webhooks,
 )
 from app.core.config import Settings, get_settings
@@ -114,7 +115,7 @@ def create_app(
             if app.state.instagram is not None:
                 await app.state.instagram.client.aclose()
 
-    app = FastAPI(title="ECHO backend", version="0.5.0", lifespan=lifespan)
+    app = FastAPI(title="ECHO backend", version="0.5.1", lifespan=lifespan)
     app.dependency_overrides[get_settings] = lambda: settings
 
     @app.middleware("http")
@@ -135,6 +136,7 @@ def create_app(
     app.include_router(jobs.router)
     app.include_router(friends.router)
     app.include_router(reviews.router)
+    app.include_router(updates.router)
     app.include_router(dev.router)
     app.include_router(instagram.router)
     app.include_router(instagram.public_router)

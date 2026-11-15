@@ -146,6 +146,36 @@ final class MessagingStore {
         }
     }
 
+    // MARK: Live updates
+
+    /// Keeps one long-poll request open while the app is in the foreground and
+    /// reloads messages, drafts and activity the moment the server has news
+    /// (a new DM, an automatic reply, a held draft…). Returns when cancelled.
+    func runLiveUpdates() async {
+        guard isRemote else { return }
+        var cursor: String?
+        var failures = 0
+        while !Task.isCancelled {
+            do {
+                let update = try await backend.waitForUpdates(since: cursor)
+                failures = 0
+                if update.changed && cursor != nil { await reloadQuietly() }
+                cursor = update.cursor
+            } catch {
+                if Task.isCancelled { return }
+                failures += 1
+                try? await Task.sleep(for: .seconds(min(30, 2 * failures)))   // offline / Mac asleep
+            }
+        }
+    }
+
+    /// Like refresh(), but never shows an error banner (it runs in the background).
+    private func reloadQuietly() async {
+        if let loaded = try? await backend.loadConversations() { conversations = loaded }
+        if let loaded = try? await backend.loadReviews() { reviews = loaded }
+        if let loaded = try? await backend.loadActivity() { activity = loaded }
+    }
+
     // MARK: Automatic replies
 
     func refreshReviews() async {

@@ -361,3 +361,90 @@ def test_offline_mock_mode_simulated_message_gets_auto_reply(make_client, db_url
     thread = next(c for c in client.get("/v1/conversations", headers=AUTH).json()["conversations"]
                   if c["id"] == friend["id"])
     assert thread["messages"][-1]["sender"] == "echo_auto"
+
+
+# ------------------------------------------- missed webhooks: pull + live updates
+
+def _iso(seconds_ago: float) -> str:
+    return datetime.fromtimestamp(time.time() - seconds_ago, UTC).strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+
+def _age_history(db_url: str) -> None:
+    """The fixture's first DM happened 'now'; make it older than the pulled ones."""
+    with psycopg.connect(db_url) as conn:
+        conn.execute("update ig_messages set platform_time = now() - interval '1 hour'")
+
+
+def _msg(mid: str, text: str, seconds_ago: float, from_me: bool = False) -> dict:
+    return {"id": mid, "created_time": _iso(seconds_ago), "message": text,
+            "from": {"id": "17841400000000001" if from_me else "igsid-mika"}}
+
+
+@requires_db
+def test_sync_pulls_five_threads_and_replies_to_unanswered_messages(ar):
+    client, fake, db_url, friend_id = ar
+    _age_history(db_url)
+    fake.thread = [_msg("pull-2", "are you around?", 20), _msg("pull-1", "heyyy", 60)]   # newest first
+    r = client.post("/v1/instagram/sync", headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json()["messages"] == 2 and r.json()["replies_queued"] == 1
+    params = next(p for m, where, p in fake.calls if where.endswith("/conversations"))
+    assert params["limit"] == "5" and "messages.limit(10)" in params["fields"]
+    assert tick(client).replies_sent == 1
+    assert fake.sent[-1]["text"] == "[mock] haha are you around? 😄"
+
+    # Pulling again finds nothing new and queues nothing.
+    r = client.post("/v1/instagram/sync", headers=AUTH)
+    assert r.json()["messages"] == 0 and r.json()["replies_queued"] == 0
+    # ECHO's own reply showing up in the pull (different id) is not mistaken for yours.
+    fake.thread = [_msg("pull-3", fake.sent[-1]["text"], 5, from_me=True)] + fake.thread
+    client.post("/v1/instagram/sync", headers=AUTH)
+    assert client.get("/v1/friends", headers=AUTH).json()["friends"][0]["manual_override_until"] is None
+
+
+@requires_db
+def test_pull_respects_your_own_reply_and_old_messages(ar):
+    client, fake, db_url, friend_id = ar
+    # You already answered in the Instagram app → no auto reply, ECHO steps back.
+    fake.thread = [_msg("own-2", "on my way", 10, from_me=True), _msg("own-1", "where are you", 30)]
+    assert client.post("/v1/instagram/sync", headers=AUTH).json()["replies_queued"] == 0
+    assert client.get("/v1/friends", headers=AUTH).json()["friends"][0]["manual_override_until"] is not None
+    # A message from 5 hours ago isn't answered.
+    client.delete(f"/v1/friends/{friend_id}/takeover", headers=AUTH)
+    fake.thread = [_msg("old-1", "morning", 5 * 3600)]
+    assert client.post("/v1/instagram/sync", headers=AUTH).json()["replies_queued"] == 0
+
+
+@requires_db
+def test_sync_rate_limit_is_explained(ar):
+    client, fake, db_url, friend_id = ar
+    fake.conversations_error = (400, {"message": "Please reduce the amount of data you're asking for, then "
+                                                 "retry your request", "code": 1})
+    r = client.post("/v1/instagram/sync", headers=AUTH)
+    assert r.status_code == 429 and "slow down" in r.json()["detail"]
+
+
+@requires_db
+def test_worker_polls_when_webhooks_are_missed(ar):
+    client, fake, db_url, friend_id = ar
+    client.app.state.worker.settings.instagram_poll_seconds = 30
+    _age_history(db_url)
+    fake.thread = [_msg("poll-1", "you there?", 15)]
+    tick(client)                       # poll stores + queues
+    tick(client)                       # reply goes out
+    assert fake.sent and fake.sent[-1]["text"] == "[mock] haha you there? 😄"
+
+
+@requires_db
+def test_live_updates_long_poll(ar):
+    client, fake, db_url, friend_id = ar
+    first = client.get("/v1/updates", headers=AUTH, params={"wait": 0}).json()
+    assert first["changed"] is True and first["cursor"]
+    quiet = client.get("/v1/updates", headers=AUTH, params={"since": first["cursor"], "wait": 1}).json()
+    assert quiet == {"cursor": first["cursor"], "changed": False}
+    dm(client, "live-1", "new message")
+    tick(client)
+    after = client.get("/v1/updates", headers=AUTH, params={"since": first["cursor"], "wait": 5}).json()
+    assert after["changed"] is True and after["cursor"] != first["cursor"]
+    conv = client.get("/v1/conversations", headers=AUTH).json()["conversations"][0]
+    assert conv["last_auto_reply"]["status"] == "sent" and conv["last_auto_reply"]["text"] == "ECHO replied."

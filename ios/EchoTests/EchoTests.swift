@@ -499,6 +499,22 @@ final class AutoReplyTests: XCTestCase {
         XCTAssertTrue(item.windowOpen(now: ISO8601DateFormatter().date(from: "2026-11-13T08:00:00Z")!))
     }
 
+    func testConversationDecodesLastAutoReply() throws {
+        let json = """
+        {"id": "7d1c1a3e-0000-4000-8000-000000000002", "unread_count": 0, "messages": [],
+         "friend": {"id": "7d1c1a3e-0000-4000-8000-000000000002", "igsid": "x", "display_name": "Mika",
+                    "username": "mika", "style": "close_friend", "language": "en", "ai_reply_enabled": true,
+                    "consent": "granted", "last_inbound_at": null, "manual_override_until": null},
+         "last_auto_reply": {"status": "skipped", "reason": "ai_off",
+                             "text": "No reply: AI replies are off for this friend.", "at": "2026-11-15T10:00:00Z"}}
+        """.data(using: .utf8)!
+        let conversation: ConversationSummary = try JSONDecoderBox.decode(json)
+        XCTAssertEqual(conversation.lastAutoReply?.status, "skipped")
+        XCTAssertEqual(conversation.lastAutoReply?.systemImage, "minus.circle")
+        let update: LiveUpdate = try JSONDecoderBox.decode(#"{"cursor": "2026-11-15T10:00:00+00:00", "changed": true}"#.data(using: .utf8)!)
+        XCTAssertTrue(update.changed)
+    }
+
     func testTakeoverChangesAutomationState() {
         var friend = Friend(id: UUID(), igsid: "x", displayName: "Mika", username: "mika", style: .closeFriend,
                             language: "en", aiReplyEnabled: true, consent: .granted, lastInboundAt: .now)

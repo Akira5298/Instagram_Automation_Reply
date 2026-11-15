@@ -134,6 +134,12 @@ Review queue (/v1/reviews): send (edited or not; consent + window + account re-c
 
 The model never decides whether a message may be sent; it only drafts and raises flags. Every flag can only *hold* a reply, never release one.
 
+**Two ways in, one pipeline.** Webhooks are the instant path. As a safety net, for when webhooks are missed (the app isn't Live yet, the Mac slept, Meta had a hiccup), the worker pulls the **5 latest threads × 10 messages** every `INSTAGRAM_POLL_SECONDS` (default 30 s, backing off to 10 min on rate limits). A pulled message is checked against both message ids and same-text-within-5-minutes, because Meta's ids can differ per API. Only the newest new message per thread is acted on:
+- an inbound message under 2 hours old goes to `on_inbound`
+- your own reply goes to `on_manual_outbound`
+
+**Live app updates.** `GET /v1/updates?since=<cursor>&wait=25` is a long poll. The cursor is the latest change across messages, reviews, friends, notifications and auto replies. The app keeps one request open while in the foreground and reloads when it changes. Each conversation also carries `last_auto_reply` (status + plain-words reason), so the app can say why ECHO did or didn't reply.
+
 ### 3.3 Scheduled message (Feature 4)
 
 - `scheduled_jobs` holds the definition: recipient, instruction, IANA timezone, local wall-clock time and an RRULE.

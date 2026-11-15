@@ -62,6 +62,7 @@ def make_settings(**overrides) -> Settings:
         meta_webhook_verify_token="verify-me",
         summary_trigger_messages=6,
         summary_keep_recent=2,
+        instagram_poll_seconds=0,      # tests drive pulls explicitly
         _env_file=None,
     )
     values.update(overrides)

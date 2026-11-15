@@ -81,6 +81,11 @@ class GraphError(Exception):
         return self.status >= 500 or self.status == 429 or (self.code in _TRANSIENT_CODES)
 
     @property
+    def is_rate_limited(self) -> bool:
+        text = self.message.lower()
+        return self.code in (4, 17, 32, 613, 80002, 80006) or self.status == 429 or "reduce the amount of data" in text
+
+    @property
     def is_auth_error(self) -> bool:
         return self.code == 190 or self.status == 401
 
@@ -252,11 +257,16 @@ class InstagramClient:
     async def user_profile(self, token: str, igsid: str) -> dict[str, Any]:
         return await self._graph("GET", igsid, token, params={"fields": "name,username"})
 
-    async def conversations(self, token: str, ig_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    async def conversations(self, token: str, ig_id: str | None = None, limit: int = 5,
+                            messages_per_thread: int = 10) -> list[dict[str, Any]]:
+        """The most recent threads with their latest messages. Kept small on
+        purpose: large nested requests fail with "Please reduce the amount of
+        data you're asking for"."""
         path = f"{ig_id}/conversations" if self.unified and ig_id else "me/conversations"
         data = await self._graph("GET", path, token, params={
             "platform": "instagram",
-            "fields": "id,updated_time,participants,messages.limit(20){id,created_time,from,to,message}",
+            "fields": f"id,updated_time,participants,messages.limit({messages_per_thread})"
+                      "{id,created_time,from,message}",
             "limit": str(limit),
         })
         return data.get("data", [])

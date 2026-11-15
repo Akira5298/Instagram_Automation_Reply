@@ -29,6 +29,8 @@ class FakeGraph:
         self.assigned: list[str] | None = [IG_ID]      # None → endpoint errors
         self.granular_targets: list[str] = [IG_ID]
         self.token_expires_in: int | None = None       # None → system-user token (never expires)
+        self.thread: list[dict] = []                   # newest first, like the Conversations API
+        self.conversations_error: tuple[int, dict] | None = None
         self._mid = itertools.count(1)
 
     def transport(self) -> httpx.MockTransport:
@@ -127,6 +129,15 @@ class FakeGraph:
             return httpx.Response(200, json={"data": []})
         if tail == IG_ID:
             return httpx.Response(200, json={"id": IG_ID, "username": "my.creator", "name": "Me"})
+        if tail == f"{IG_ID}/conversations":
+            if self.conversations_error:
+                status, err = self.conversations_error
+                return httpx.Response(status, json={"error": err})
+            return httpx.Response(200, json={"data": [{
+                "id": "conv-1",
+                "participants": {"data": [{"id": IG_ID}, {"id": "igsid-mika"}]},
+                "messages": {"data": self.thread},
+            }] if self.thread else []})
         if tail == f"{IG_ID}/subscribed_apps":
             return httpx.Response(200, json={"success": True})
         if tail == f"{IG_ID}/messages" and request.method == "POST":

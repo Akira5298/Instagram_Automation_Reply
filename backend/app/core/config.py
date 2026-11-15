@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     instagram_min_send_interval: float = 1.0
     # Friends' message text is wiped after this many days (metadata kept).
     message_retention_days: int = 30
+    # Safety net for missed webhooks: pull the 5 most recent Instagram threads
+    # this often (seconds). Webhooks stay the main, instant path. 0 = off.
+    instagram_poll_seconds: int = 30
 
     default_timezone: str = "Asia/Kuala_Lumpur"
 

@@ -120,13 +120,50 @@ async def update_friend(friend_id: UUID, body: FriendPatch, user_id: UUID = Depe
 @router.get("/conversations")
 async def conversations(user_id: UUID = Depends(require_user), conn: AsyncConnection = Depends(get_conn)):
     items = await messaging_repo.conversations(conn, user_id)
+    cur = await conn.execute(
+        """
+        select distinct on (friend_id) friend_id, status, reason, coalesce(executed_at, created_at) as at
+        from auto_replies where user_id = %s
+        order by friend_id, created_at desc
+        """,
+        (user_id,),
+    )
+    last_reply = {r["friend_id"]: r for r in await cur.fetchall()}
     return {
         "conversations": [
             {"id": c["friend"]["id"], "friend": friend_out(c["friend"]),
-             "messages": [message_out(m) for m in c["messages"]], "unread_count": 0}
+             "messages": [message_out(m) for m in c["messages"]], "unread_count": 0,
+             "last_auto_reply": _auto_reply_out(last_reply.get(c["friend"]["id"]))}
             for c in items
         ]
     }
+
+
+def _auto_reply_out(row: dict | None) -> dict | None:
+    """What happened to the latest message ECHO considered answering, in words."""
+    if row is None:
+        return None
+    from app.domain.safety import REASON_TEXT
+    from app.worker.auto_reply import BLOCK_TEXT, SKIP_TEXT
+
+    reason = row["reason"] or ""
+    first = reason.split(",")[0]
+    status = row["status"]
+    if status == "pending":
+        text = "ECHO will reply in a moment."
+    elif status in ("running", "sending"):
+        text = "ECHO is replying…"
+    elif status == "sent":
+        text = "ECHO replied."
+    elif status == "needs_attention":
+        text = f"Waiting for you: it {REASON_TEXT.get(first, first)}."
+    elif status == "blocked":
+        text = f"Not sent: {BLOCK_TEXT.get(first, first)}."
+    elif status == "failed":
+        text = "Couldn't send the reply. Check the activity feed."
+    else:  # skipped / superseded / cancelled
+        text = f"No reply: {SKIP_TEXT.get(first, {'settings_changed': 'settings changed', 'dismissed': 'you dismissed the draft', 'newer_message': 'a newer message arrived', 'consent_revoked': 'they said STOP'}.get(first, first))}."
+    return {"status": status, "reason": reason or None, "text": text, "at": row["at"]}
 
 
 @router.post("/friends/{friend_id}/messages", status_code=201)

@@ -19,6 +19,7 @@ from app.core.config import Settings
 from app.core.crypto import TokenCipher
 from app.core.public_url import oauth_redirect_uri, public_base_url
 from app.db import messaging_repo, profile_repo
+from app.services import auto_reply
 from app.integrations.meta.instagram_client import (
     UNIFIED_MESSAGING_SCOPE,
     GraphError,
@@ -445,18 +446,25 @@ class InstagramService:
 
     # ---------------------------------------------------------------- sync
 
-    async def sync_conversations(self, conn: AsyncConnection, user_id: UUID, retention_days: int = 30) -> dict:
-        """Backfill recent threads via the Conversations API (e.g. right after
-        connecting). Messages older than the retention period are skipped."""
+    async def sync_conversations(self, conn: AsyncConnection, user_id: UUID, retention_days: int = 30,
+                                 limit: int = 5) -> dict:
+        """Pull the most recent threads via the Conversations API: the "Sync"
+        button, and the worker's safety-net poll when webhooks are missed.
+
+        New messages found here are treated exactly like webhook deliveries:
+        a new, unanswered message from a friend can get an automatic reply
+        (if it's under 2 hours old), and a reply you sent from the Instagram
+        app makes ECHO step back."""
         account = await messaging_repo.get_active_account(conn, user_id)
         if account is None or account["provider"] != "instagram":
             raise InstagramNotConfigured("Instagram isn't connected")
         token = await self.token_for(conn, account["ig_user_id"])
         if token is None:
             raise InstagramNotConfigured("Instagram login expired — reconnect it")
-        cutoff = self.clock() - timedelta(days=retention_days)
-        threads = await self.client.conversations(token, account["ig_user_id"])
-        friends_seen, messages_seen = 0, 0
+        now = self.clock()
+        cutoff = now - timedelta(days=retention_days)
+        threads = await self.client.conversations(token, account["ig_user_id"], limit=limit)
+        friends_seen, messages_seen, queued = 0, 0, 0
         for thread in threads:
             participants = (thread.get("participants") or {}).get("data", [])
             others = [p for p in participants if str(p.get("id")) != account["ig_user_id"]]
@@ -464,18 +472,78 @@ class InstagramService:
                 continue
             friend = await self.ensure_friend(conn, account=account, igsid=str(others[0]["id"]), token=token)
             friends_seen += 1
+            msgs = []
             for m in (thread.get("messages") or {}).get("data", []):
-                at = datetime.fromisoformat(str(m["created_time"]).replace("+0000", "+00:00"))
-                if at < cutoff or not m.get("message"):
+                try:
+                    at = datetime.fromisoformat(str(m["created_time"]).replace("+0000", "+00:00"))
+                except (KeyError, ValueError):
                     continue
-                from_id = str((m.get("from") or {}).get("id"))
-                if from_id == account["ig_user_id"]:
+                msgs.append((at, m))
+            msgs.sort(key=lambda pair: pair[0])           # the API lists newest first
+            newest_new: tuple[str, datetime, dict] | None = None
+            for at, m in msgs:
+                text = m.get("message")
+                if at < cutoff or not text:
+                    continue
+                if await messaging_repo.message_exists(conn, m["id"]):
+                    newest_new = None                     # something newer than any "new" one is known
+                    continue
+                from_me = str((m.get("from") or {}).get("id")) == account["ig_user_id"]
+                direction = "outbound" if from_me else "inbound"
+                if await self._looks_like_duplicate(conn, friend["id"], direction, text, at):
+                    newest_new = None
+                    continue
+                if from_me:
                     await messaging_repo.record_outbound(conn, user_id=user_id, friend_id=friend["id"],
-                                                         text=m["message"], mid=m["id"], sent_by="user_manual", at=at)
+                                                         text=text, mid=m["id"], sent_by="user_manual", at=at)
                 else:
                     await messaging_repo.record_inbound(conn, user_id=user_id, friend_id=friend["id"],
-                                                        text=m["message"], mid=m["id"], at=at)
+                                                        text=text, mid=m["id"], at=at)
+                newest_new = (direction, at, m)
                 messages_seen += 1
-        await conn.execute("update instagram_accounts set last_synced_at = %s where id = %s",
-                           (self.clock(), account["id"]))
-        return {"friends": friends_seen, "messages": messages_seen}
+            if newest_new is None:
+                continue
+            direction, at, m = newest_new
+            if direction == "inbound" and now - at < timedelta(hours=2):
+                fresh = await messaging_repo.get_friend(conn, user_id, friend["id"])
+                outcome = await auto_reply.on_inbound(conn, user_id=user_id, friend=fresh, mid=m["id"],
+                                                      text=m.get("message"), at=at, now=now)
+                queued += outcome == "queued"
+            elif direction == "outbound" and now - at < timedelta(hours=2):
+                await auto_reply.on_manual_outbound(conn, user_id=user_id, friend_id=friend["id"], at=max(at, now))
+        await conn.execute("update instagram_accounts set last_synced_at = %s where id = %s", (now, account["id"]))
+        return {"friends": friends_seen, "messages": messages_seen, "replies_queued": queued}
+
+    async def _looks_like_duplicate(self, conn: AsyncConnection, friend_id: UUID, direction: str, text: str,
+                                    at: datetime) -> bool:
+        """Same text, same direction, within 5 minutes: already stored under the
+        id from the webhook or the Send API (Meta's ids can differ per API)."""
+        cur = await conn.execute(
+            """
+            select 1 from ig_messages
+            where friend_id = %s and direction = %s and content = %s
+              and platform_time between %s and %s
+            limit 1
+            """,
+            (friend_id, direction, text, at - timedelta(minutes=5), at + timedelta(minutes=5)),
+        )
+        return await cur.fetchone() is not None
+
+    async def poll_all(self, pool: AsyncConnectionPool) -> int:
+        """Worker safety net: pull recent threads for every active account."""
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "select user_id from instagram_accounts where provider = 'instagram' and status = 'active' "
+                "and login_mode = %s",
+                (self.client.login_mode,),
+            )
+            users = [r["user_id"] for r in await cur.fetchall()]
+        found = 0
+        for user_id in users:
+            try:
+                async with pool.connection() as conn:
+                    result = await self.sync_conversations(conn, user_id)
+                found += result["messages"]
+            except InstagramNotConfigured:
+                continue   # login expired: status + notification already handle it
+        return found
