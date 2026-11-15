@@ -139,13 +139,16 @@ class Worker:
         return stats
 
     async def _maintenance(self, now: datetime) -> None:
-        """Hourly: refresh expiring Instagram tokens; purge old message text."""
+        """At startup, then hourly: refresh expiring Instagram tokens, re-subscribe
+        webhooks (Meta drops them after ~1 h of failed deliveries, e.g. while the
+        Mac slept) and purge old message text."""
         if self._last_maintenance and now - self._last_maintenance < timedelta(hours=1):
             return
         self._last_maintenance = now
         try:
             if self.instagram is not None:
                 await self.instagram.refresh_expiring_tokens(self.pool)
+                await self.instagram.ensure_webhook_subscriptions(self.pool)
             async with self.pool.connection() as conn:
                 await messaging_repo.purge_old_content(
                     conn, now - timedelta(days=self.settings.message_retention_days))

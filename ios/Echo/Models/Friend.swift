@@ -186,6 +186,12 @@ struct InstagramStatus: Codable, Hashable, Sendable {
     var lastWebhookAt: Date?
     var lastSyncedAt: Date?
     var lastError: String?
+    /// "unified" (Instagram API with Unified Login) or "instagram" (legacy Instagram Login).
+    var loginMode: String?
+    /// The connected account was set up with a different login than the server now uses.
+    var needsReconnect: Bool?
+    /// .env keys the server still needs before Instagram can be connected.
+    var missingSettings: [String]?
 
     var usesMockInstagram: Bool { provider == "mock" }
 

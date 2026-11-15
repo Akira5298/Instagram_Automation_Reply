@@ -11,7 +11,7 @@ struct MessagesView: View {
                 EchoBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: EchoSpacing.md) {
-                        AutomationBanner(settings: $settings, automatedCount: viewModel.automatedCount, onTogglePause: onTogglePause)
+                        AutomationBanner(settings: $settings, onTogglePause: onTogglePause, automatedCount: viewModel.automatedCount)
 
                         if viewModel.isMock {
                             Label("Offline sample conversations — connect your backend in Settings", systemImage: "testtube.2")

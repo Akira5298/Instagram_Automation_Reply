@@ -24,6 +24,11 @@ class FakeGraph:
         self.permissions = "instagram_business_basic,instagram_business_manage_messages"
         self.account_type = "MEDIA_CREATOR"
         self.profiles = {"igsid-mika": {"name": "Mika Sato", "username": "mika.s"}}
+        # Unified Login knobs
+        self.unified_scopes = ["instagram_basic", "instagram_manage_messages"]
+        self.assigned: list[str] | None = [IG_ID]      # None → endpoint errors
+        self.granular_targets: list[str] = [IG_ID]
+        self.token_expires_in: int | None = None       # None → system-user token (never expires)
         self._mid = itertools.count(1)
 
     def transport(self) -> httpx.MockTransport:
@@ -40,6 +45,9 @@ class FakeGraph:
             else:
                 body = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         self.calls.append((request.method, f"{url.host}{path}", {**dict(url.params), **body}))
+
+        if url.host == "graph.facebook.com":
+            return self.handle_facebook(request, path, dict(url.params), body)
 
         if url.host == "api.instagram.com" and path == "/oauth/access_token":
             if body.get("code") != "good-code":
@@ -85,10 +93,61 @@ class FakeGraph:
         return httpx.Response(404, json={"error": {"message": f"unknown path {path}", "code": 100}})
 
 
+    # ------------------------------------------------ graph.facebook.com (Unified Login)
+
+    def handle_facebook(self, request: httpx.Request, path: str, params: dict, body: dict) -> httpx.Response:
+        tail = path.split("/", 2)[-1]  # strip "/v26.0/"
+        proof_ok = "appsecret_proof" in params
+        if tail == "oauth/access_token":
+            if params.get("grant_type") == "fb_exchange_token":
+                return httpx.Response(200, json={"access_token": "EAA-long-user", "token_type": "bearer",
+                                                 "expires_in": 5183944})
+            if params.get("code") != "good-code":
+                return httpx.Response(400, json={"error": {"message": "Invalid verification code format.",
+                                                           "type": "OAuthException", "code": 100}})
+            data = {"access_token": "EAA-system-user", "token_type": "bearer"}
+            if self.token_expires_in:
+                data = {"access_token": "EAA-short-user", "token_type": "bearer", "expires_in": self.token_expires_in}
+            return httpx.Response(200, json=data)
+        if tail == "debug_token":
+            return httpx.Response(200, json={"data": {
+                "app_id": "999", "type": "SYSTEM_USER", "is_valid": True, "expires_at": 0, "user_id": "sysuser-1",
+                "scopes": self.unified_scopes,
+                "granular_scopes": [{"scope": "instagram_manage_messages", "target_ids": self.granular_targets}],
+            }})
+        if not proof_ok:
+            return httpx.Response(400, json={"error": {"message": "appsecret_proof missing", "code": 100}})
+        if tail == "me":
+            return httpx.Response(200, json={"id": "sysuser-1", "name": "ECHO System User"})
+        if tail == "me/assigned_instagram_accounts":
+            if self.assigned is None:
+                return httpx.Response(400, json={"error": {"message": "Unsupported get request", "code": 100}})
+            return httpx.Response(200, json={"data": [{"id": i} for i in self.assigned]})
+        if tail == "me/accounts":
+            return httpx.Response(200, json={"data": []})
+        if tail == IG_ID:
+            return httpx.Response(200, json={"id": IG_ID, "username": "my.creator", "name": "Me"})
+        if tail == f"{IG_ID}/subscribed_apps":
+            return httpx.Response(200, json={"success": True})
+        if tail == f"{IG_ID}/messages" and request.method == "POST":
+            if self.send_error:
+                status, err = self.send_error
+                return httpx.Response(status, json={"error": err})
+            mid = f"aWdf{next(self._mid):06d}"
+            self.sent.append({"to": body["recipient"]["id"], "text": body["message"]["text"], "mid": mid,
+                              "auth": request.headers.get("authorization"), "host": "graph.facebook.com"})
+            return httpx.Response(200, json={"recipient_id": body["recipient"]["id"], "message_id": mid})
+        if tail in self.profiles:
+            return httpx.Response(200, json=self.profiles[tail])
+        return httpx.Response(404, json={"error": {"message": f"unknown path {path}", "code": 100}})
+
+
 def make_service(fake: FakeGraph, settings, key: str | None = None):
     from app.services.instagram_service import InstagramService
 
-    client = InstagramClient(app_id="123", app_secret=APP_SECRET, redirect_uri=settings.oauth_redirect_uri,
+    unified = settings.meta_login_mode == "unified"
+    client = InstagramClient(app_id="999" if unified else "123", app_secret=APP_SECRET,
+                             login_mode=settings.meta_login_mode, config_id="cfg-42" if unified else None,
                              graph_version="v26.0", http=httpx.AsyncClient(transport=fake.transport()))
     return InstagramService(settings=settings, client=client, cipher=TokenCipher(key or generate_key()))
 

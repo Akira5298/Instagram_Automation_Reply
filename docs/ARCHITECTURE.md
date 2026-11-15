@@ -1,14 +1,14 @@
 # ECHO — Architecture Overview
 
-*Updated for Phase 4 · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
+*Updated for Phase 4 (local Mac deployment) · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
 
 ## 1. The short version
 
 ECHO has three parts:
 
 1. **iOS app** (SwiftUI, MVVM, iOS 17+). It shows the UI and keeps a small encrypted local cache. It holds **no** Claude API key, Meta secrets or long-lived Instagram tokens.
-2. **Backend** (FastAPI on Railway or Render). It owns every secret. It calls Claude and Meta, verifies webhooks, and enforces the messaging rules.
-3. **Worker + PostgreSQL** (Supabase). The database holds the jobs. A worker process claims due work, runs deterministic eligibility checks, sends, retries and reconciles. This keeps running when your phone is off.
+2. **Backend** (FastAPI, Python 3.12) running **on your Mac**, reachable from the internet only through a **Cloudflare Tunnel**. It owns every secret. It calls Claude and Meta, verifies webhooks, and enforces the messaging rules.
+3. **Worker + PostgreSQL** (local PostgreSQL database `echo`). The database holds the jobs. A worker inside the same process claims due work, runs deterministic eligibility checks, sends, retries and reconciles. It runs whenever the Mac is awake and `scripts/start.sh` is running, independent of the phone.
 
 The language model writes text. It never decides whether a message is *allowed* to be sent. That decision comes from plain backend code (`app/domain/messaging_window.py`), which has unit tests.
 
@@ -17,21 +17,22 @@ flowchart LR
     subgraph iPhone
         A[SwiftUI app<br/>MVVM + Keychain]
     end
-    subgraph Backend["Backend (Railway / Render)"]
+    subgraph Mac["Your Mac (scripts/start.sh)"]
         B[FastAPI API<br/>auth · chat · jobs · settings]
         W[Worker<br/>dispatch · retries · reconciliation]
         G[Eligibility gate<br/>deterministic rules]
         S[Safety gate<br/>money · promises · sensitive]
+        DB[(PostgreSQL 'echo')]
     end
-    DB[(Supabase Postgres)]
+    T[Cloudflare Tunnel<br/>public https]
     C[Anthropic Claude API]
-    M[Meta Instagram API<br/>graph.instagram.com]
+    M[Meta Instagram API<br/>Unified Login · graph.facebook.com]
     APNs[Apple Push<br/>Notification service]
 
-    A -- HTTPS + bearer/JWT --> B
+    A -- "localhost (Simulator) or https via tunnel" --> B
     B <--> DB
     W <--> DB
-    M -- signed webhooks --> B
+    M -- signed webhooks --> T --> B
     B --> C
     W --> C
     W --> G --> S --> M
@@ -67,7 +68,7 @@ flowchart LR
 | `integrations/meta/` | Webhook signature verification now; Graph API client in Phase 4 |
 | `worker/` *(Phase 3)* | Claims due `job_runs` and `webhook_events`, then generates, gates, sends and notifies |
 
-**Auth.** ECHO has one owner, so the backend uses a single long random bearer token (`ECHO_API_TOKEN`), stored in the iOS Keychain and compared in constant time. Sign in with Apple → Supabase Auth JWTs only becomes worthwhile if ECHO serves more than one person. That would mean swapping the `require_user` dependency, so it's deferred to Phase 6 as optional hardening.
+**Auth.** ECHO has one owner, so the backend uses a single long random bearer token (`ECHO_API_TOKEN`), stored in the iOS Keychain and compared in constant time. Sign in with Apple JWTs only become worthwhile if ECHO serves more than one person. That would mean swapping the `require_user` dependency, so it's deferred to Phase 6 as optional hardening.
 
 ## 3. Key flows
 
@@ -119,7 +120,7 @@ Worker claims event ─▶ ignore echoes of our own sends (loop guard)
   ─▶ Claude drafts reply + classifies: money / commitment / sensitive / unknown info / emotional
   ─▶ SAFETY GATE: any flag ─▶ review_items (needs_attention) + push; stop
   ─▶ INSERT outbound_messages (reply_to_inbound_id UNIQUE → max one auto reply per inbound)
-  ─▶ re-check eligibility ─▶ POST graph.instagram.com/<version>/me/messages
+  ─▶ re-check eligibility ─▶ POST graph.facebook.com/<version>/<IG_ID>/messages
   ─▶ mark sent / retry with backoff / unknown → reconcile ─▶ audit_log + notification_outbox
 ```
 
@@ -167,16 +168,20 @@ Supporting pieces:
 
 ### 3.3b Instagram integration — as implemented in Phase 4
 
-- **Login.** The app calls `POST /v1/instagram/connect` and gets back an `instagram.com/oauth/authorize` URL carrying a single-use `state` that expires after 15 minutes. It opens the URL in `ASWebAuthenticationSession`. Instagram redirects to `/v1/instagram/oauth/callback`, where the server:
+- **Login (Unified Login, default since Nov 2026).** New Meta apps only offer *Instagram API with Unified Login*. The app calls `POST /v1/instagram/connect` and gets back a `facebook.com/{v}/dialog/oauth` URL. The URL carries the app ID, the login `config_id` (permissions come from that configuration, so no `scope` is sent) and a single-use `state` that expires after 15 minutes. The app opens the URL in `ASWebAuthenticationSession`, where the person signs in with Instagram or Facebook and selects their account. Meta then redirects to `/v1/instagram/oauth/callback`, where the server:
   1. checks the state
-  2. exchanges the code for a short-lived token (`api.instagram.com/oauth/access_token`)
-  3. exchanges that for a long-lived token, about 60 days (`graph.instagram.com/access_token`, `ig_exchange_token`)
-  4. reads `/me` and rejects personal accounts and missing messaging permission
-  5. encrypts the token with AES-256-GCM
-  6. retires other accounts, including the Phase 3 mock
-  7. subscribes webhooks (`/me/subscribed_apps?subscribed_fields=messages`)
-  8. redirects to `echo://instagram/connected?status=…`, which closes the sheet
-- **Tokens** are refreshed hourly by the worker when fewer than 10 days remain (`refresh_access_token`). A Graph error 190 marks the account `expired` and sends a `connection_error` notification.
+  2. exchanges the code at `graph.facebook.com/{v}/oauth/access_token`. That gives a Business Integration System User token, which doesn't expire by default. A short-lived user token from a user-token configuration is swapped via `fb_exchange_token`.
+  3. reads `debug_token` and rejects the login if `instagram_manage_messages` is missing
+  4. finds the shared account with `/me/assigned_instagram_accounts`, falling back to granular-scope target IDs and then to Page links
+  5. reads `/{IG_ID}?fields=id,username,name`
+  6. encrypts the token with AES-256-GCM
+  7. stores `login_mode='unified'` and the token's Meta user (`/me` id)
+  8. retires other accounts, including the Phase 3 mock
+  9. subscribes webhooks (`POST /{IG_ID}/subscribed_apps?subscribed_fields=messages`)
+  10. redirects to `echo://instagram/connected?status=…`
+
+  Every `graph.facebook.com` call carries `appsecret_proof`. The legacy *Instagram Login* flow (`instagram.com/oauth/authorize`, `graph.instagram.com`, 60-day tokens refreshed hourly when fewer than 10 days remain) is still there behind `META_LOGIN_MODE=instagram`.
+- **Tokens.** Unified tokens can't be refreshed. A Graph error 190 marks the account `expired` and sends a `connection_error` notification, and you connect again. If an account was connected under the other login mode, it shows "needs reconnect" instead of failing silently.
 - **Webhooks.** The signature is checked over the raw bytes, then each messaging event is stored in `webhook_events` keyed `ig:<mid>:<msg|echo|deleted>`, which absorbs Meta's retries. The worker processes them (see the README flow). New friends are created with **AI off and consent unknown**. Message text is purged after `MESSAGE_RETENTION_DAYS`.
 - **Sending** (`InstagramMessagingProvider`):
   - Sends are paced per account.
@@ -216,8 +221,8 @@ Checked against Meta's developer documentation on 10 Nov 2026. Re-check before P
 
 **Verified facts**
 
-- **API.** Instagram API with Instagram Login (host `graph.instagram.com`; current docs show `v26.0`). Sending is `POST /<IG_ID>/messages` or `/me/messages` with `recipient.id = <IGSID>`.
-- **Permissions:** `instagram_business_basic` + `instagram_business_manage_messages`.
+- **API.** Instagram API with Unified Login, which Meta recommends for new integrations and the only setup new apps get (host `graph.facebook.com`, `v26.0`, no Facebook Page needed, app must be in a business portfolio). Sending is `POST /<IG_ID>/messages` with `recipient.id = <IGSID>`. Legacy mode: Instagram API with Instagram Login on `graph.instagram.com`.
+- **Permissions:** `instagram_basic` + `instagram_manage_messages`, set in the login configuration. Legacy mode uses `instagram_business_basic` + `instagram_business_manage_messages`.
 - **Account type.** Your account must be an Instagram **Business or Creator** (professional) account. Personal accounts are not supported.
 - **Who can message first.** You can only message someone **after they message you**. The standard window is **24 hours** from their latest message. (Click-to-Direct ads can extend it to 7 days; that doesn't apply here.)
 - **Human Agent tag.** The `human_agent` tag allows a 7-day window, but only for replies **written by a human**. ECHO never uses it for AI or unattended sends.
@@ -236,6 +241,7 @@ Checked against Meta's developer documentation on 10 Nov 2026. Re-check before P
 4. The **"Allow access to messages"** toggle in the Instagram app (Settings → Messages → Connected tools) must be on, or webhooks never arrive.
 
 Sources:
+- [Instagram Platform (Unified Login)](https://developers.facebook.com/documentation/instagram-platform)
 - [Send Messages — Instagram API with Instagram Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/messaging-api)
 - [Webhooks — Instagram Platform](https://developers.facebook.com/docs/instagram-platform/webhooks)
 - [Instagram Platform overview: access levels and Human Agent](https://developers.facebook.com/documentation/instagram-platform/overview)
@@ -243,12 +249,30 @@ Sources:
 
 ## 6. Security and privacy
 
-- **Secrets** come only from backend environment variables. Instagram tokens are encrypted before they're stored (`access_token_ciphertext`). Long-lived tokens last 60 days and are refreshed by the worker.
+- **Secrets** come only from backend environment variables. Instagram tokens are encrypted before they're stored (`access_token_ciphertext`). Unified Login system-user tokens don't expire by default and are never refreshed. Legacy Instagram Login tokens last 60 days and the worker refreshes them. All `graph.facebook.com` calls carry `appsecret_proof`.
 - **Database.** RLS is enabled on every table with no policies. Client roles are denied, and only the backend's service role can access data.
 - **Webhooks.** Signatures are verified against the raw bytes with a constant-time compare. Unsigned or badly signed requests get a 403.
 - **On device.** The local cache is written with `.completeFileProtection`. The backend token lives in the Keychain (`AfterFirstUnlockThisDeviceOnly`, never synced). Plain http is allowed only for local-network development (`NSAllowsLocalNetworking`); deployed backends must use https.
 - **Audit.** `audit_log` is append-only (updates are rejected by a trigger). Deleting your account cascades and erases everything.
 - **Data minimisation.** Friends' message content is purged after the retention period. Sensitive friend memories need approval and an expiry.
+
+## 6a. Deployment: local Mac (current choice)
+
+| Piece | How it runs |
+|---|---|
+| API + worker | `scripts/start.sh` → `uvicorn` on `127.0.0.1:8000` (`--proxy-headers`), worker in-process |
+| Database | Local PostgreSQL, database `echo`; schema via `python -m app.migrate` (tracked in `schema_migrations`) |
+| Public https | Cloudflare Tunnel: *quick* (random `trycloudflare.com`, changes every start; URL handed to the server via `backend/.public_url`) or *named* (fixed hostname, `ECHO_PUBLIC_BASE_URL`) |
+| Secrets | `backend/.env` (chmod 600), generated by `scripts/setup_mac.sh` |
+| Pre-flight | `python -m app.doctor`: env, DB, migrations, Claude key, tunnel reachability, webhook handshake, Meta URLs |
+
+Laptop consequences, and how ECHO handles them:
+- **Login redirect URI:** each Instagram login stores the redirect URI it started with, so a quick-tunnel address change can't corrupt a login.
+- **Webhook subscription:** Meta unsubscribes after about an hour of failed webhook deliveries, so the worker re-subscribes at startup and hourly. Missed threads are backfilled with *Sync recent conversations*.
+- **Sleep:** `caffeinate` prevents idle sleep while ECHO runs.
+- **Overdue jobs:** jobs that fall due while the Mac is off are blocked, never sent late (§3.3a).
+
+Moving to a hosted server later needs no code changes. Set `ECHO_PUBLIC_BASE_URL` and `DATABASE_URL` and run the same `uvicorn` command.
 
 ## 7. Reliability checklist and where each item lives
 
@@ -261,7 +285,7 @@ Sources:
 | Retries | Exponential backoff, eligibility re-checked on every attempt |
 | Rate limits | Per-account token bucket in the worker; honour `429` / error-code backoff |
 | Timezones | IANA zone + local time + RRULE; everything stored as `timestamptz` |
-| Runs without the phone | Worker on the server; iOS background tasks are never relied on |
+| Runs without the phone | Worker on the Mac backend; iOS background tasks are never relied on |
 | Observability | JSON logs with request and job ids; Sentry (or similar) in Phase 6 |
 
 ## 8. Phase plan
@@ -271,6 +295,6 @@ Sources:
 | 1 | Architecture, schema, design system, 5 screens, mock chat, backend skeleton | ✅ |
 | 2 | Claude via FastAPI, chat persistence, profile learning and memory, writing examples, Keychain token, mock ↔ backend switch | ✅ |
 | 3 | Scheduler: jobs/friends/automation APIs, durable worker, DST-safe RRULE, safety + eligibility gates, mock messaging provider, activity feed, chat-created jobs | ✅ |
-| 4 | Instagram Login (OAuth), encrypted tokens + refresh, signed webhooks → inbound/echo processing, Graph API delivery, conversation sync, deauthorize/data-deletion callbacks, privacy page, Meta setup + App Review guide | ✅ |
+| 4 | Instagram API with Unified Login (Facebook Login for Business + config_id; legacy Instagram Login optional), encrypted tokens, signed webhooks → inbound/echo processing, Graph API delivery, conversation sync, deauthorize/data-deletion callbacks, privacy page, Meta setup + App Review guide | ✅ |
 | 5 | Autonomous replies, friend controls, consent and safety gates end to end | next |
 | 6 | Polish, APNs push delivery, security review, deploy, TestFlight (optional: Sign in with Apple) | |

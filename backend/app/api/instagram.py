@@ -1,5 +1,5 @@
-"""Instagram connection (Business Login for Instagram) and Meta's required
-deauthorize / data-deletion callbacks."""
+"""Instagram connection (Unified Login by default; legacy Instagram Login with
+META_LOGIN_MODE=instagram) and Meta's required deauthorize / data-deletion callbacks."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from psycopg import AsyncConnection
 from pydantic import BaseModel
 
 from app.core.config import Settings, get_settings
+from app.core.public_url import public_base_url
 from app.core.security import require_user
 from app.db import profile_repo
 from app.db.pool import get_conn
@@ -25,13 +26,14 @@ router = APIRouter(prefix="/v1/instagram", tags=["instagram"])
 APP_CALLBACK = "echo://instagram/connected"
 
 
-def get_instagram(request: Request) -> InstagramService:
+def get_instagram(request: Request, settings: Settings = Depends(get_settings)) -> InstagramService:
     service = getattr(request.app.state, "instagram", None)
     if service is None:
+        missing = settings.instagram_missing_settings() or ["META_* settings"]
         raise HTTPException(
             status_code=503,
-            detail="Instagram isn't configured on the server. Set META_INSTAGRAM_APP_ID, META_APP_SECRET, "
-                   "ECHO_TOKEN_ENCRYPTION_KEY and ECHO_PUBLIC_BASE_URL.",
+            detail=f"Instagram isn't configured on the server. Set {', '.join(missing)} in backend/.env "
+                   "(see docs/META_SETUP.md) and restart.",
         )
     return service
 
@@ -46,15 +48,17 @@ async def status(request: Request, user_id: UUID = Depends(require_user),
     service = getattr(request.app.state, "instagram", None)
     if service is None:
         return {"connected": False, "configured": False, "provider": settings.echo_messaging_provider,
-                "mock_account": False}
+                "mock_account": False, "login_mode": settings.meta_login_mode,
+                "missing_settings": settings.instagram_missing_settings()}
     return await service.status(conn, user_id)
 
 
 @router.post("/connect")
 async def connect(user_id: UUID = Depends(require_user), conn: AsyncConnection = Depends(get_conn),
                   service: InstagramService = Depends(get_instagram)):
-    """Returns the Instagram login URL. The app opens it in a secure browser
-    sheet; Instagram redirects to /oauth/callback, which redirects to
+    """Returns Meta's login URL (Unified Login: Facebook's dialog, where you can
+    sign in with Instagram or Facebook). The app opens it in a secure browser
+    sheet; Meta redirects to /oauth/callback, which redirects to
     echo://instagram/connected?status=… to close the sheet."""
     try:
         url = await service.start_connect(conn, user_id)
@@ -79,7 +83,7 @@ async def oauth_callback(
     if error:
         return back("cancelled", message=error_description or error)
     if not code or not state:
-        return back("error", message="Missing code from Instagram")
+        return back("error", message="Missing code from Meta")
     service = getattr(request.app.state, "instagram", None)
     if service is None:
         return back("error", message="Instagram isn't configured on the server")
@@ -115,16 +119,18 @@ async def disconnect(body: Disconnect, user_id: UUID = Depends(require_user),
 @router.post("/deauthorize", include_in_schema=False)
 async def deauthorize(request: Request, signed_request: str = Form(...),
                       settings: Settings = Depends(get_settings)):
-    """Called by Meta when you remove ECHO from your Instagram account."""
+    """Called by Meta when you remove ECHO from your account. The signed
+    request's user_id is the Instagram user (legacy login) or the Meta user
+    (Unified Login), so both columns are matched."""
     payload = _verify(signed_request, settings)
-    ig_user_id = str(payload.get("user_id") or "")
+    meta_id = str(payload.get("user_id") or "")
     async with request.app.state.pool.connection() as conn:
         cur = await conn.execute(
             """
             update instagram_accounts set status = 'revoked', access_token_ciphertext = null
-            where ig_user_id = %s returning user_id, id
+            where %s::text <> '' and (ig_user_id = %s or meta_user_id = %s) returning user_id, id
             """,
-            (ig_user_id,),
+            (meta_id, meta_id, meta_id),
         )
         row = await cur.fetchone()
         if row:
@@ -139,13 +145,17 @@ async def data_deletion(request: Request, signed_request: str = Form(...),
     """Meta's data-deletion callback: delete everything ECHO stored about this
     Instagram account and return a status URL + confirmation code."""
     payload = _verify(signed_request, settings)
-    ig_user_id = str(payload.get("user_id") or "")
+    meta_id = str(payload.get("user_id") or "")
     code = secrets.token_hex(8)
     async with request.app.state.pool.connection() as conn:
         await conn.execute("insert into data_deletion_requests (confirmation_code, ig_user_id) values (%s, %s)",
-                           (code, ig_user_id))
-        cur = await conn.execute("select id, user_id from instagram_accounts where ig_user_id = %s", (ig_user_id,))
+                           (code, meta_id))
+        cur = await conn.execute(
+            "select id, user_id, ig_user_id from instagram_accounts "
+            "where %s::text <> '' and (ig_user_id = %s or meta_user_id = %s)",
+            (meta_id, meta_id, meta_id))
         account = await cur.fetchone()
+        ig_user_id = account["ig_user_id"] if account else meta_id
         if account:
             # Cascades to friends, their messages, consent records and jobs.
             await conn.execute("delete from instagram_accounts where id = %s", (account["id"],))
@@ -156,7 +166,7 @@ async def data_deletion(request: Request, signed_request: str = Form(...),
             "update data_deletion_requests set status = 'completed', completed_at = now() where confirmation_code = %s",
             (code,),
         )
-    base = (settings.echo_public_base_url or str(request.base_url)).rstrip("/")
+    base = (public_base_url(settings) or str(request.base_url)).rstrip("/")
     return {"url": f"{base}/v1/instagram/data-deletion/{code}", "confirmation_code": code}
 
 
@@ -189,7 +199,7 @@ public_router = APIRouter(tags=["public"])
 
 @public_router.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy(settings: Settings = Depends(get_settings)) -> str:
-    base = (settings.echo_public_base_url or "").rstrip("/")
+    base = (public_base_url(settings) or "").rstrip("/")
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>ECHO — Privacy Policy</title>
 <style>body{{font:16px/1.6 -apple-system,system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;color:#111}}</style>

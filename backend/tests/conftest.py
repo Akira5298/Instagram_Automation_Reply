@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 
-MIGRATIONS = sorted((Path(__file__).resolve().parents[1] / "supabase" / "migrations").glob("*.sql"))
+MIGRATIONS = sorted((Path(__file__).resolve().parents[1] / "migrations").glob("*.sql"))
 TEST_DB_URL = os.environ.get("ECHO_TEST_DATABASE_URL")
 TOKEN = "t0ken"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -29,11 +29,12 @@ requires_db = pytest.mark.skipif(not TEST_DB_URL, reason="ECHO_TEST_DATABASE_URL
 
 
 def _reset_schema(url: str) -> None:
+    from app.migrate import migrate
+
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute("drop schema if exists public cascade")
         conn.execute("create schema public")
-        for migration in MIGRATIONS:
-            conn.execute(migration.read_text())
+    migrate(url)
 
 
 @pytest.fixture(scope="session")
@@ -47,7 +48,8 @@ def migrated_db() -> str:
 def db_url(migrated_db: str) -> str:
     with psycopg.connect(migrated_db, autocommit=True) as conn:
         tables = conn.execute(
-            "select string_agg(quote_ident(tablename), ', ') from pg_tables where schemaname = 'public'"
+            "select string_agg(quote_ident(tablename), ', ') from pg_tables "
+            "where schemaname = 'public' and tablename <> 'schema_migrations'"
         ).fetchone()[0]
         conn.execute(f"truncate {tables} cascade")
     return migrated_db

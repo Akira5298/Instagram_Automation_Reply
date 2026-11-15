@@ -19,7 +19,7 @@ FRIEND_COLUMNS = """
 
 ACCOUNT_COLUMNS = """
     id, user_id, ig_user_id, username, account_type, provider, status, token_expires_at,
-    webhook_subscribed_at, last_webhook_at, last_synced_at, last_error, connected_at
+    webhook_subscribed_at, last_webhook_at, last_synced_at, last_error, connected_at, login_mode, meta_user_id
 """
 
 

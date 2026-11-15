@@ -13,7 +13,7 @@ def create_pool(database_url: str, min_size: int = 1, max_size: int = 5) -> Asyn
     """Async connection pool.
 
     `prepare_threshold=None` disables server-side prepared statements so the
-    pool also works behind Supabase's transaction pooler (pgbouncer mode).
+    pool also works behind connection poolers such as pgbouncer.
     """
     return AsyncConnectionPool(
         conninfo=database_url,

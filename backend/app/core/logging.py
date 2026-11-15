@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 
 class JsonFormatter(logging.Formatter):
-    """One JSON object per line — easy to search in Railway/Render logs."""
+    """One JSON object per line — easy to search with grep/jq (logs/echo.log)."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {

@@ -34,7 +34,7 @@ struct InstagramSettingsSection: View {
         } header: {
             Text("Instagram")
         } footer: {
-            Text("Uses Meta's official Instagram API (Business Login for Instagram). Requires an Instagram Creator or Business account. ECHO can only message people who messaged you first, within Instagram's 24-hour window.")
+            Text("Uses Meta's official Instagram API with Unified Login: sign in with Instagram or Facebook and pick your Creator or Business account. No Facebook Page needed. ECHO can only message people who messaged you first, within Instagram's 24-hour window.")
         }
         .listRowBackground(EchoColor.surface.opacity(0.7))
         .task(id: app.connectionMode) {
@@ -71,7 +71,7 @@ struct InstagramSettingsSection: View {
             }
         }
         if let expires = status.tokenExpiresAt {
-            LabeledContent("Login renews by") {
+            LabeledContent(status.loginMode == "instagram" ? "Login renews by" : "Login expires") {
                 Text(expires, format: .dateTime.day().month(.abbreviated))
             }
         }
@@ -103,8 +103,15 @@ struct InstagramSettingsSection: View {
     @ViewBuilder
     private var disconnectedRows: some View {
         if let status, !status.configured {
-            Label("The server isn't set up for Instagram yet. Add the META_* settings and ECHO_PUBLIC_BASE_URL (see docs/META_SETUP.md).",
+            let missing = (status.missingSettings ?? []).joined(separator: ", ")
+            Label("The server isn't ready for Instagram yet: it needs \(missing.isEmpty ? "the META_* settings" : missing) and a running Cloudflare Tunnel (scripts/start.sh). See docs/META_SETUP.md.",
                   systemImage: "wrench.and.screwdriver")
+                .font(EchoFont.caption)
+                .foregroundStyle(EchoColor.warning)
+        }
+        if let status, status.needsReconnect == true, status.status != "expired" {
+            Label("ECHO now uses Meta's Unified Login. Connect again to keep messaging.",
+                  systemImage: "arrow.triangle.2.circlepath")
                 .font(EchoFont.caption)
                 .foregroundStyle(EchoColor.warning)
         }

@@ -15,7 +15,7 @@ def require_user(
 ) -> UUID:
     """Single-owner auth: a long random bearer token, kept in the iOS Keychain.
 
-    Returns the owner's user id. Swap this dependency for Supabase Auth JWT
+    Returns the owner's user id. Swap this dependency for a real auth provider (e.g. Sign in with Apple JWTs)
     verification if ECHO ever serves more than one person.
     """
     expected = settings.echo_api_token.get_secret_value()

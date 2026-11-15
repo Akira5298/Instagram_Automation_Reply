@@ -65,8 +65,9 @@ def test_split_events_keys():
 
 async def test_authorize_url():
     fake = FakeGraph()
-    service = make_service(fake, make_settings(echo_public_base_url="https://echo.example.com"))
-    url = urlparse(service.client.authorize_url("state123"))
+    service = make_service(fake, make_settings(echo_public_base_url="https://echo.example.com",
+                                               meta_login_mode="instagram"))
+    url = urlparse(service.client.authorize_url("state123", "https://echo.example.com/v1/instagram/oauth/callback"))
     q = parse_qs(url.query)
     assert url.netloc == "www.instagram.com" and url.path == "/oauth/authorize"
     assert q["scope"] == ["instagram_business_basic,instagram_business_manage_messages"]
@@ -97,10 +98,12 @@ def ig(make_client, db_url):
     fake = FakeGraph()
     settings = make_settings(database_url=db_url, echo_public_base_url="https://echo.example.com",
                              echo_messaging_provider="instagram", meta_instagram_app_id="123",
+                             meta_login_mode="instagram",
                              echo_token_encryption_key=generate_key(), instagram_min_send_interval=0.0)
     service = make_service(fake, settings, key=settings.echo_token_encryption_key.get_secret_value())
     client = make_client(instagram_service=service, database_url=db_url, echo_public_base_url="https://echo.example.com",
                          echo_messaging_provider="instagram", meta_instagram_app_id="123",
+                         meta_login_mode="instagram",
                          echo_token_encryption_key=settings.echo_token_encryption_key.get_secret_value(),
                          instagram_min_send_interval=0.0)
 
@@ -325,3 +328,149 @@ def test_privacy_page(ig):
 def test_instagram_endpoints_explain_missing_config(make_client):
     client = make_client()
     assert client.get("/health").status_code == 200
+
+
+
+@requires_db
+def test_connect_explains_missing_unified_settings(make_client, db_url):
+    client = make_client(database_url=db_url)
+    r = client.post("/v1/instagram/connect", headers=AUTH)
+    assert r.status_code == 503
+    assert "META_APP_ID" in r.json()["detail"] and "META_LOGIN_CONFIG_ID" in r.json()["detail"]
+    status = client.get("/v1/instagram/status", headers=AUTH).json()
+    assert status["login_mode"] == "unified" and "META_APP_ID" in status["missing_settings"]
+
+
+# ------------------------------------------------------- Unified Login (default)
+
+def test_unified_settings_and_authorize_url():
+    s = make_settings(meta_app_id="999", meta_login_config_id="cfg-42")
+    assert s.meta_login_mode == "unified" and s.meta_client_id == "999"
+    assert s.instagram_missing_settings() == ["ECHO_TOKEN_ENCRYPTION_KEY"]
+    legacy = make_settings(meta_login_mode="instagram")
+    assert legacy.instagram_missing_settings() == ["META_INSTAGRAM_APP_ID", "ECHO_TOKEN_ENCRYPTION_KEY"]
+
+    service = make_service(FakeGraph(), make_settings())
+    service.client.extra_login_params = "display=popup&config_id=ignored"
+    url = urlparse(service.client.authorize_url("st", "https://echo.example.com/v1/instagram/oauth/callback"))
+    q = parse_qs(url.query)
+    assert url.netloc == "www.facebook.com" and url.path == "/v26.0/dialog/oauth"
+    assert q["client_id"] == ["999"] and q["config_id"] == ["cfg-42"] and "scope" not in q
+    assert q["response_type"] == ["code"] and q["state"] == ["st"] and q["display"] == ["popup"]
+
+
+async def test_unified_calls_carry_appsecret_proof():
+    fake = FakeGraph()
+    service = make_service(fake, make_settings())
+    await service.client.send_text("EAA-system-user", IG_ID, "igsid-mika", "hey")
+    method, where, params = fake.calls[-1]
+    assert where == f"graph.facebook.com/v26.0/{IG_ID}/messages"
+    expected = hmac.new(APP_SECRET.encode(), b"EAA-system-user", hashlib.sha256).hexdigest()
+    assert params["appsecret_proof"] == expected
+
+
+@pytest.fixture
+def igu(make_client, db_url):
+    if not db_url:
+        pytest.skip("needs database")
+    fake = FakeGraph()
+    key = generate_key()
+    common = dict(database_url=db_url, echo_public_base_url="https://echo.example.com",
+                  echo_messaging_provider="instagram", meta_app_id="999", meta_login_config_id="cfg-42",
+                  echo_token_encryption_key=key, instagram_min_send_interval=0.0)
+    service = make_service(fake, make_settings(**common), key=key)
+    client = make_client(instagram_service=service, **common)
+
+    def connect():
+        r = client.post("/v1/instagram/connect", headers=AUTH)
+        assert r.status_code == 200, r.text
+        assert urlparse(r.json()["authorize_url"]).netloc == "www.facebook.com"
+        state = parse_qs(urlparse(r.json()["authorize_url"]).query)["state"][0]
+        return client.get("/v1/instagram/oauth/callback", params={"code": "good-code", "state": state},
+                          follow_redirects=False)
+
+    return client, fake, connect, db_url
+
+
+@requires_db
+def test_unified_connect_send_and_no_refresh(igu):
+    client, fake, connect, db_url = igu
+    cb = connect()
+    assert cb.headers["location"].startswith("echo://instagram/connected?status=ok"), cb.headers["location"]
+    assert "username=my.creator" in cb.headers["location"]
+    with psycopg.connect(db_url) as conn:
+        row = conn.execute("select ig_user_id, login_mode, meta_user_id, token_expires_at, webhook_subscribed_at, "
+                           "granted_scopes from instagram_accounts where provider = 'instagram'").fetchone()
+    assert row[0] == IG_ID and row[1] == "unified" and row[2] == "sysuser-1"
+    assert row[3] is None, "system-user tokens don't expire"
+    assert row[4] is not None and "instagram_manage_messages" in row[5]
+    assert any(where == f"graph.facebook.com/v26.0/{IG_ID}/subscribed_apps" for _, where, _ in fake.calls)
+    assert not any("graph.instagram.com" in where for _, where, _ in fake.calls)
+
+    status = client.get("/v1/instagram/status", headers=AUTH).json()
+    assert status["connected"] and status["login_mode"] == "unified" and not status["needs_reconnect"]
+
+    # Inbound DM → friend; scheduled message goes out over graph.facebook.com.
+    post_webhook(client, webhook_payload(inbound("mid-1", "hi!")))
+    tick(client)
+    mika = client.get("/v1/friends", headers=AUTH).json()["friends"][0]
+    client.patch(f"/v1/friends/{mika['id']}", headers=AUTH,
+                 json={"ai_reply_enabled": True, "consent": "granted", "style": "close_friend"})
+    day = datetime.now(KL).date() + timedelta(days=1)
+    job = client.post("/v1/jobs", headers=AUTH, json={
+        "friend_id": mika["id"], "scheduled_at": f"{day}T20:00", "instruction": "ask if she's free friday"}).json()
+    client.post(f"/v1/jobs/{job['id']}/run-now", headers=AUTH)
+    assert tick(client).sent == 1
+    assert fake.sent and all(s["host"] == "graph.facebook.com" for s in fake.sent)
+    assert fake.sent[0]["auth"] == "Bearer EAA-system-user"
+
+    service = client.app.state.instagram
+    assert client.portal.call(service.refresh_expiring_tokens, client.app.state.pool) == 0
+    assert client.portal.call(service.ensure_webhook_subscriptions, client.app.state.pool) == 1
+
+
+@requires_db
+def test_unified_discovery_fallbacks_and_errors(igu):
+    client, fake, connect, db_url = igu
+    fake.assigned = None  # endpoint fails → granular_scopes target_ids
+    assert "status=ok" in connect().headers["location"]
+
+    fake.assigned, fake.granular_targets = [], []
+    loc = connect().headers["location"]
+    assert "status=error" in loc and "No+Instagram+account" in loc
+
+    fake.assigned = [IG_ID]
+    fake.unified_scopes = ["instagram_basic"]
+    loc = connect().headers["location"]
+    assert "status=error" in loc and "instagram_manage_messages" in loc
+
+
+@requires_db
+def test_unified_user_token_config_is_exchanged_for_long_lived(igu):
+    client, fake, connect, db_url = igu
+    fake.token_expires_in = 3600
+    assert "status=ok" in connect().headers["location"]
+    assert any(p.get("grant_type") == "fb_exchange_token" for _, _, p in fake.calls)
+
+
+@requires_db
+def test_unified_deauthorize_matches_meta_user(igu):
+    client, fake, connect, db_url = igu
+    connect()
+    sr = make_signed_request({"algorithm": "HMAC-SHA256", "user_id": "sysuser-1", "issued_at": 1}, APP_SECRET)
+    assert client.post("/v1/instagram/deauthorize", data={"signed_request": sr}).status_code == 200
+    with psycopg.connect(db_url) as conn:
+        status, token = conn.execute("select status, access_token_ciphertext from instagram_accounts "
+                                     "where provider = 'instagram'").fetchone()
+    assert status == "revoked" and token is None
+
+
+@requires_db
+def test_legacy_account_needs_reconnect_under_unified(igu):
+    client, fake, connect, db_url = igu
+    with psycopg.connect(db_url) as conn:
+        conn.execute("""insert into instagram_accounts (user_id, ig_user_id, provider, status, username, login_mode)
+                        values ('00000000-0000-0000-0000-000000000001', 'old-ig', 'instagram', 'active', 'old',
+                                'instagram')""")
+    status = client.get("/v1/instagram/status", headers=AUTH).json()
+    assert status["connected"] is False and status["needs_reconnect"] is True

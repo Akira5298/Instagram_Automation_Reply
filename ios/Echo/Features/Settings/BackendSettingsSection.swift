@@ -127,7 +127,7 @@ struct BackendSettingsSection: View {
         } header: {
             Text("AI & backend")
         } footer: {
-            Text("Sample friends live on your server's mock Instagram so you can test scheduling end to end (development only). The app never holds your Claude API key or Meta secrets — only a token for your own backend, kept in the iOS Keychain. In the Simulator use http://localhost:8000. On an iPhone, use your Mac's local IP (e.g. http://192.168.1.20:8000) or your deployed https URL.")
+            Text("Sample friends live on your server's mock Instagram so you can test scheduling end to end (development only). The app never holds your Claude API key or Meta secrets — only a token for your own backend, kept in the iOS Keychain. In the Simulator use http://localhost:8000. On an iPhone, use the https Cloudflare Tunnel address printed by scripts/start.sh.")
         }
         .listRowBackground(EchoColor.surface.opacity(0.7))
         .onAppear { urlDraft = app.settings.backendBaseURL }

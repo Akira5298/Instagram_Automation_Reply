@@ -1,93 +1,84 @@
 # ECHO — AI personal messaging assistant (iOS)
 
-**Phase 4: real Instagram.** ECHO now connects to your Instagram Creator/Business account through Meta's official *Instagram API with Instagram Login*:
+ECHO runs entirely on your Mac: **FastAPI (Python 3.12) + local PostgreSQL + Claude API + a Cloudflare Tunnel** for the public https address Meta needs. There are no hosting costs; you pay only for Claude API usage.
 
-- **Login:** a secure browser sheet runs Business Login for Instagram. Tokens are encrypted on your server and never stored on the phone.
-- **Receiving:** your DMs arrive by signed webhook, are stored once (deduplicated), and open each friend's 24-hour window.
-- **Sending:** scheduled messages go out through the Graph API. ECHO paces sends and maps Instagram's errors to retry, fail, or "outcome unknown".
-- **Echoes:** messages ECHO sent are recognised when Instagram echoes them back, so ECHO never reacts to itself. Replies you type in the Instagram app are recorded as yours.
-- **Maintenance:** tokens refresh automatically, message text is purged after 30 days, and Meta's deauthorize and data-deletion callbacks plus a privacy page are built in.
+**Phase 4 — real Instagram.**
+- Meta's Instagram API with Unified Login (sign in with Instagram or Facebook, no Facebook Page needed), with encrypted tokens.
+- Signed webhooks bring in your DMs.
+- Scheduled messages are delivered through the official Graph API.
+- Meta's deauthorize and data-deletion callbacks are built in, plus a privacy page.
 
-New people who DM you always start with **AI replies off and consent "Not asked"**. Automatic replies to incoming messages arrive in Phase 5.
+New people who DM you always start with AI replies **off** and consent **"Not asked"**.
 
-➡️ **Start with [`docs/META_SETUP.md`](docs/META_SETUP.md)**: Meta app, webhooks, testing, App Review and deploying to Railway.
+➡️ **Full guide: [`docs/META_SETUP.md`](docs/META_SETUP.md)**: Mac setup, Cloudflare Tunnel, Meta app, testing, App Review, and laptop caveats.
 
-## Upgrade from Phase 3
+## Quick start
 
-1. **Run the new migration.** Supabase SQL Editor, or:
-   ```bash
-   psql echo -f backend/supabase/migrations/0004_instagram.sql
-   ```
-2. **Update packages.** This adds `cryptography` and `python-multipart`.
-   ```bash
-   pip install -r backend/requirements.txt
-   ```
-3. **Get an https URL.** Meta requires https for both login and webhooks. Deploy to Railway (META_SETUP §6) or use a tunnel (`cloudflared tunnel --url http://localhost:8000`).
-4. **Create the Meta app and fill in the `META_*` and `ECHO_*` settings.** Follow META_SETUP §1–4. Then set `ECHO_MESSAGING_PROVIDER=instagram`.
-5. **Restart the server.** `/health` should report `"version": "0.4.0"`.
-6. **Rebuild the app** (`cd ios && xcodegen generate`, then ⌘R). In the app:
-   - Set **Settings → AI & backend → Backend URL** to the https URL.
-   - Tap **Settings → Instagram → Connect Instagram**.
-
-To keep testing without Instagram, leave `ECHO_MESSAGING_PROVIDER=mock`. Everything from Phase 3 still works.
-
-## What happens to a DM now
-
-```
-Friend sends DM ─▶ Meta webhook (X-Hub-Signature-256 verified) ─▶ webhook_events (unique per mid) ─▶ 200 OK
-                                                                        │ worker, a few seconds later
-      ┌─────────────────────────────────────────────────────────────────┘
-      ├─ is_self / reactions / seen      → ignored
-      ├─ is_deleted                      → text removed
-      ├─ is_echo of ECHO's own send      → ignored (loop guard: mid already stored)
-      ├─ is_echo you typed in Instagram  → stored as "me"
-      └─ inbound                         → friend found or created (name via User Profile API,
-                                           AI off, consent unknown), message stored, 24h window opened
+```bash
+cd ~/Downloads/Instagram_App
+chmod +x scripts/*.sh
+./scripts/setup_mac.sh     # once: Python env, PostgreSQL "echo", cloudflared, secrets, migrations
+# edit backend/.env → ECHO_AI_PROVIDER=anthropic, ANTHROPIC_API_KEY=…, and later META_*
+./scripts/start.sh         # backend + Cloudflare Tunnel + caffeinate; prints your https URL and checks
 ```
 
-Scheduled sends still pass, at dispatch time, the safety gate and the deterministic eligibility check: 24-hour window, consent, per-friend toggle, emergency pause and account status. The send then goes to `POST graph.instagram.com/v26.0/<IG_ID>/messages`.
+In a second terminal, while ECHO runs:
 
-## Backend layout (new in Phase 4)
+```bash
+cd ~/Downloads/Instagram_App/backend
+.venv/bin/python -m app.doctor           # re-run the pre-flight checks any time
+.venv/bin/python -m app.migrate --status # which database migrations are applied
+tail -f ../logs/server.log
+```
+
+iOS: `cd ios && xcodegen generate && open Echo.xcodeproj`, then ⌘R. In the app, go to Settings → AI & backend and set:
+- **Backend URL:** `http://localhost:8000` in the Simulator, or the tunnel's `https://…` address on an iPhone
+- **API token:** the value of `ECHO_API_TOKEN` from `backend/.env`
+
+## Updating your existing project
+
+1. Copy the new files over your existing project, **keeping your `backend/.env`** and `backend/.venv`.
+2. Delete the old `backend/supabase/` folder. Migrations now live in `backend/migrations/`.
+3. Delete `backend/Procfile`. It was only used for Railway.
+4. Run `./scripts/setup_mac.sh`. It adds new packages and settings, and records the migrations you already applied by hand.
+
+## What's in the box
 
 ```
-backend/app/
-├── integrations/meta/instagram_client.py  # OAuth, token exchange/refresh, me, subscribe, send, profile, conversations
-├── integrations/meta/signed_request.py    # Meta deauthorize / data-deletion signatures
-├── core/crypto.py                         # AES-256-GCM token encryption
-├── services/instagram_service.py          # connect, status, refresh, sync, friend creation
-├── services/webhook_service.py            # ingest + process webhooks (worker)
-├── messaging/instagram_provider.py        # real delivery, error mapping, pacing
-├── api/instagram.py                       # /v1/instagram/* + /privacy
-├── Procfile, .python-version              # Railway / Render
-└── supabase/migrations/0004_instagram.sql
-ios/Echo/Features/Settings/InstagramSettingsSection.swift   # ASWebAuthenticationSession login
+Instagram_App/
+├── scripts/
+│   ├── setup_mac.sh                  # one-time setup (idempotent)
+│   ├── start.sh                      # run backend + tunnel (quick or named) + caffeinate
+│   └── cloudflared/config.example.yml# named-tunnel config template
+├── backend/
+│   ├── app/
+│   │   ├── migrate.py                # python -m app.migrate  (tracks + detects applied migrations)
+│   │   ├── doctor.py                 # python -m app.doctor   (pre-flight + Meta dashboard URLs)
+│   │   ├── core/public_url.py        # tunnel URL: ECHO_PUBLIC_BASE_URL or backend/.public_url
+│   │   ├── integrations/meta/        # Instagram Graph API client, webhook signatures, signed_request
+│   │   ├── services/                 # chat, scheduler, instagram (connect/refresh/re-subscribe), webhooks
+│   │   ├── worker/runner.py          # scheduler + webhook processing + hourly maintenance
+│   │   └── api/                      # /v1/* , /webhooks/meta , /privacy
+│   ├── migrations/0001…0005.sql      # plain PostgreSQL
+│   ├── tests/                        # 124 tests (fake Graph API + real PostgreSQL)
+│   └── .env.example
+├── ios/                              # SwiftUI app (XcodeGen project.yml)
+└── docs/ARCHITECTURE.md, docs/META_SETUP.md
 ```
+
+## Laptop-specific behaviour
+
+- **Sleep:** the server binds to `127.0.0.1` only, and the tunnel is the single way in. `start.sh` keeps the Mac awake with `caffeinate` while ECHO runs, but closing the lid still sleeps it.
+- **Missed webhooks:** Meta unsubscribes webhooks after about an hour of failed deliveries. ECHO re-subscribes at every start and every hour. Use **Settings → Instagram → Sync recent conversations** to backfill.
+- **Scheduled messages missed while offline** are **blocked, never sent late**, and you get a notification.
+- **Quick-tunnel addresses change on every start.** Update the Meta dashboard and the iPhone app each time, or set up a named tunnel (META_SETUP §2b).
 
 ## Tests
 
 ```bash
 cd backend
-ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test pytest -q   # 121 passed
+createdb echo_test   # disposable; tests wipe it
+ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test .venv/bin/python -m pytest -q
 ```
 
-Phase 4 tests run against a **fake Graph API** (`tests/fake_graph.py`). They cover:
-- the full login: state, code exchange, long-lived token, account type and permission checks, encrypted storage, webhook subscription
-- duplicate webhooks
-- the echo loop guard
-- deleted messages
-- conversation sync
-- token refresh
-- Graph errors mapped to retry, fail, or expired login
-- the deletion and deauthorize callbacks
-
-iOS: ⌘U runs 27 tests.
-
-Nothing here has run against the real Instagram API yet. That happens when you complete META_SETUP. If the real API behaves differently, send me the server log line (it includes Meta's error code and message) and I'll adjust.
-
-## Earlier phases
-
-- **Phase 1:** design system, five screens, schema.
-- **Phase 2:** Claude chat and personality memory.
-- **Phase 3:** scheduler worker, recurrence, safety and eligibility gates, activity feed.
-
-The Phase 2 and 3 setup notes are in `docs/ARCHITECTURE.md` §3 and §8.
+The suite has 124 tests, including the migration runner and tunnel URL resolution. iOS: ⌘U.

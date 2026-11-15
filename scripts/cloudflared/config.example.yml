@@ -1,0 +1,11 @@
+# Named Cloudflare Tunnel for ECHO — a fixed https hostname that survives restarts.
+# Needs a domain on your (free) Cloudflare account. Setup: docs/META_SETUP.md §2b.
+#
+# Copy to ~/.cloudflared/config.yml and replace the placeholders.
+tunnel: echo
+credentials-file: /Users/YOUR_MAC_USERNAME/.cloudflared/TUNNEL_UUID.json
+
+ingress:
+  - hostname: echo.yourdomain.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404
