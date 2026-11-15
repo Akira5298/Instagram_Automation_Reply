@@ -35,6 +35,9 @@ struct SettingsView: View {
                     }
                     .listRowBackground(EchoColor.surface.opacity(0.7))
 
+                    // MARK: Automatic replies (Phase 5)
+                    AutoReplySettingsSection(store: app.messagingStore)
+
                     // MARK: Instagram
                     InstagramSettingsSection(app: app)
 

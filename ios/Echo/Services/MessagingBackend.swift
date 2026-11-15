@@ -30,6 +30,18 @@ protocol MessagingBackend {
     func loadAutomationPaused() async throws -> Bool?
     func setAutomationPaused(_ paused: Bool) async throws
 
+    // Automatic replies (Phase 5)
+    func loadReviews() async throws -> [ReviewItem]
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?) async throws
+    func takeOver(_ friend: Friend) async throws -> Friend
+    func handBack(_ friend: Friend) async throws -> Friend
+    func requestConsent(_ friend: Friend) async throws -> Friend
+    func loadStyle(for friend: Friend) async throws -> FriendStyle
+    func saveStyle(_ style: FriendStyle, for friend: Friend) async throws -> FriendStyle
+    /// nil in mock mode.
+    func loadAutomationSettings() async throws -> AutomationSettings?
+    func saveAutomationSettings(_ settings: AutomationSettings) async throws -> AutomationSettings?
+
     // Instagram connection (backend only)
     func loadInstagramStatus() async throws -> InstagramStatus?
     func instagramAuthorizeURL() async throws -> URL
@@ -63,6 +75,9 @@ final class RemoteMessagingBackend: MessagingBackend {
         let language: String
         let consent: Friend.ConsentStatus
         let manualOverrideUntil: Date?
+        let replyDelaySeconds: Int?
+        let reviewFirst: Bool?
+        let dailyReplyLimit: Int?
     }
 
     private struct TextBody: Encodable { let text: String }
@@ -91,7 +106,10 @@ final class RemoteMessagingBackend: MessagingBackend {
             style: friend.style,
             language: friend.language,
             consent: friend.consent,
-            manualOverrideUntil: friend.manualOverrideUntil
+            manualOverrideUntil: friend.manualOverrideUntil,
+            replyDelaySeconds: friend.replyDelaySeconds,
+            reviewFirst: friend.reviewFirst,
+            dailyReplyLimit: friend.dailyReplyLimit
         ))
     }
 
@@ -169,6 +187,64 @@ final class RemoteMessagingBackend: MessagingBackend {
 }
 
 extension RemoteMessagingBackend {
+    private struct ReviewsResponse: Decodable { let reviews: [ReviewItem] }
+    private struct ReviewBody: Encodable { let action: ReviewItem.Action; let text: String? }
+    private struct NoBody: Encodable {}
+    private struct Resolved: Decodable { let status: String }
+
+    private func path(_ uuid: UUID) -> String { uuid.uuidString.lowercased() }
+
+    func loadReviews() async throws -> [ReviewItem] {
+        let response: ReviewsResponse = try await apiClient.get("v1/reviews")
+        return response.reviews
+    }
+
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?) async throws {
+        let _: Resolved = try await apiClient.post("v1/reviews/\(path(item.id))", body: ReviewBody(action: action, text: text))
+    }
+
+    func takeOver(_ friend: Friend) async throws -> Friend {
+        try await apiClient.post("v1/friends/\(path(friend.id))/takeover", body: NoBody())
+    }
+
+    func handBack(_ friend: Friend) async throws -> Friend {
+        try JSONDecoderBox.decode(try await apiClient.send("DELETE", "v1/friends/\(path(friend.id))/takeover"))
+    }
+
+    func requestConsent(_ friend: Friend) async throws -> Friend {
+        try await apiClient.post("v1/friends/\(path(friend.id))/consent-request", body: NoBody())
+    }
+
+    func loadStyle(for friend: Friend) async throws -> FriendStyle {
+        try await apiClient.get("v1/friends/\(path(friend.id))/style")
+    }
+
+    func saveStyle(_ style: FriendStyle, for friend: Friend) async throws -> FriendStyle {
+        let body = try APIClient.encoder.encode(style)
+        return try JSONDecoderBox.decode(try await apiClient.send("PUT", "v1/friends/\(path(friend.id))/style", body: body))
+    }
+
+    func loadAutomationSettings() async throws -> AutomationSettings? {
+        try await apiClient.get("v1/automation")
+    }
+
+    /// Leaves the pause flag alone (that has its own switch and notification).
+    private struct SettingsBody: Encodable {
+        let takeoverMinutes: Int
+        let dailyReplyLimit: Int
+        let consentRequestText: String
+        let aiDisclosureText: String
+    }
+
+    func saveAutomationSettings(_ settings: AutomationSettings) async throws -> AutomationSettings? {
+        let body = try APIClient.encoder.encode(SettingsBody(
+            takeoverMinutes: settings.takeoverMinutes, dailyReplyLimit: settings.dailyReplyLimit,
+            consentRequestText: settings.consentRequestText, aiDisclosureText: settings.aiDisclosureText))
+        return try JSONDecoderBox.decode(try await apiClient.send("PUT", "v1/automation", body: body))
+    }
+}
+
+extension RemoteMessagingBackend {
     private struct ConnectResponse: Decodable { let authorizeUrl: String }
     private struct SyncResponse: Decodable { let friends: Int; let messages: Int }
     private struct DisconnectBody: Encodable { let deleteMessages: Bool }
@@ -219,6 +295,8 @@ final class MockMessagingBackend: MessagingBackend {
     private var activity: [ActivityItem] = []
     private var runsByJob: [UUID: [JobRun]] = [:]
     private var paused = false
+    private var reviews: [ReviewItem] = []
+    private var styles: [UUID: FriendStyle] = [:]
 
     init(now: Date = .now) {
         let sample = MockMessagingBackend.sample(now: now)
@@ -248,8 +326,23 @@ final class MockMessagingBackend: MessagingBackend {
 
     func simulateInbound(_ text: String, from friend: Friend) async throws {
         append(InstagramMessage(sender: .friend, text: text, sentAt: .now), to: friend.id)
-        if let index = conversations.firstIndex(where: { $0.friend.id == friend.id }) {
-            conversations[index].friend.lastInboundAt = .now
+        guard let index = conversations.firstIndex(where: { $0.friend.id == friend.id }) else { return }
+        conversations[index].friend.lastInboundAt = .now
+        let current = conversations[index].friend
+        // Same gates as the server, simplified: consent + AI on + not taken over + not paused.
+        guard current.aiReplyEnabled, current.consent == .granted, !current.isTakenOver(), !paused else { return }
+        let draft = "[mock] haha \(text.lowercased().prefix(60)) 😄"
+        let risky = text.range(of: #"(?i)\b(lend|owe|pay|money|rm\s?\d|free|promise)"#, options: .regularExpression) != nil
+        if risky || current.reviewFirst == true {
+            reviews.insert(ReviewItem(id: UUID(), origin: .autoReply, friendId: current.id, friendName: current.displayName,
+                                      reason: risky ? "needs_you" : "review_first",
+                                      reasonText: risky ? "needs an answer only you can give" : "is set to check every reply with you first",
+                                      draft: draft, inboundText: text, createdAt: .now,
+                                      windowExpiresAt: Date.now.addingTimeInterval(24 * 3600)), at: 0)
+            activity.insert(ActivityItem(id: UUID(), category: "needs_attention", title: "\(current.firstName) needs your reply",
+                                         body: "ECHO drafted a reply and is waiting for you.", createdAt: .now), at: 0)
+        } else {
+            append(InstagramMessage(sender: .echoAuto, text: draft, sentAt: .now.addingTimeInterval(1)), to: current.id)
         }
     }
 
@@ -362,7 +455,53 @@ final class MockMessagingBackend: MessagingBackend {
 
     func disconnectInstagram(deleteMessages: Bool) async throws {}
 
+    // MARK: Automatic replies (offline imitation)
+
+    func loadReviews() async throws -> [ReviewItem] { reviews }
+
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?) async throws {
+        reviews.removeAll { $0.id == item.id }
+        if action == .send, let body = text ?? item.draft {
+            append(InstagramMessage(sender: .echoAuto, text: body, sentAt: .now), to: item.friendId)
+        }
+    }
+
+    func takeOver(_ friend: Friend) async throws -> Friend {
+        try setFriend(friend.id) { $0.manualOverrideUntil = .now.addingTimeInterval(60 * 60) }
+    }
+
+    func handBack(_ friend: Friend) async throws -> Friend {
+        try setFriend(friend.id) { $0.manualOverrideUntil = nil }
+    }
+
+    func requestConsent(_ friend: Friend) async throws -> Friend {
+        guard friend.standardWindowRemaining() != nil else {
+            throw APIError.server(status: 409, message: "Instagram only allows messages within 24 hours of \(friend.firstName)'s last message.")
+        }
+        append(InstagramMessage(sender: .me, text: "Hey! Is it okay if my AI assistant sometimes replies for me? Reply YES or STOP.", sentAt: .now), to: friend.id)
+        return try setFriend(friend.id) { $0.consent = .requested }
+    }
+
+    func loadStyle(for friend: Friend) async throws -> FriendStyle { styles[friend.id] ?? FriendStyle() }
+
+    func saveStyle(_ style: FriendStyle, for friend: Friend) async throws -> FriendStyle {
+        styles[friend.id] = style
+        return style
+    }
+
+    func loadAutomationSettings() async throws -> AutomationSettings? { nil }
+
+    func saveAutomationSettings(_ settings: AutomationSettings) async throws -> AutomationSettings? { nil }
+
     // MARK: Helpers
+
+    private func setFriend(_ id: UUID, _ change: (inout Friend) -> Void) throws -> Friend {
+        guard let index = conversations.firstIndex(where: { $0.friend.id == id }) else {
+            throw APIError.server(status: 404, message: "Friend not found.")
+        }
+        change(&conversations[index].friend)
+        return conversations[index].friend
+    }
 
     private func append(_ message: InstagramMessage, to friendID: UUID) {
         guard let index = conversations.firstIndex(where: { $0.friend.id == friendID }) else { return }

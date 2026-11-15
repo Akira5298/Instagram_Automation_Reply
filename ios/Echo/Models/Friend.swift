@@ -62,6 +62,17 @@ struct Friend: Identifiable, Codable, Hashable, Sendable {
     var consent: ConsentStatus
     var lastInboundAt: Date?
     var manualOverrideUntil: Date? = nil
+    /// How long ECHO waits before replying, so a burst of messages gets one answer (backend default 45 s).
+    var replyDelaySeconds: Int? = nil
+    /// Every auto reply waits in the review queue for your OK.
+    var reviewFirst: Bool? = nil
+    var dailyReplyLimit: Int? = nil
+
+    /// You're handling this chat yourself; ECHO stays quiet until then.
+    func isTakenOver(now: Date = .now) -> Bool {
+        guard let manualOverrideUntil else { return false }
+        return manualOverrideUntil > now
+    }
 
     /// Display-only estimate. The backend's deterministic check is the
     /// source of truth before anything is sent.
@@ -75,7 +86,7 @@ struct Friend: Identifiable, Codable, Hashable, Sendable {
 }
 
 enum AutomationState: String, Codable, Sendable {
-    case active, off, needsAttention, paused
+    case active, off, needsAttention, paused, takenOver
 
     var title: String {
         switch self {
@@ -83,6 +94,7 @@ enum AutomationState: String, Codable, Sendable {
         case .off: return "Manual"
         case .needsAttention: return "Review"
         case .paused: return "Paused"
+        case .takenOver: return "You"
         }
     }
 
@@ -92,6 +104,7 @@ enum AutomationState: String, Codable, Sendable {
         case .off: return "hand.point.up.left.fill"
         case .needsAttention: return "exclamationmark.bubble.fill"
         case .paused: return "pause.circle.fill"
+        case .takenOver: return "person.fill.checkmark"
         }
     }
 
@@ -101,6 +114,7 @@ enum AutomationState: String, Codable, Sendable {
         case .off: return EchoColor.textSecondary
         case .needsAttention: return EchoColor.warning
         case .paused: return EchoColor.danger
+        case .takenOver: return EchoColor.blocked
         }
     }
 }
@@ -134,8 +148,10 @@ struct ConversationSummary: Identifiable, Codable, Hashable, Sendable {
 
     var lastMessage: InstagramMessage? { messages.max { $0.sentAt < $1.sentAt } }
 
-    func automationState(globalPause: Bool) -> AutomationState {
+    func automationState(globalPause: Bool, pendingReviews: Int = 0) -> AutomationState {
         if globalPause && friend.aiReplyEnabled { return .paused }
+        if pendingReviews > 0 { return .needsAttention }
+        if friend.aiReplyEnabled && friend.isTakenOver() { return .takenOver }
         if unreadCount > 0 && friend.aiReplyEnabled && friend.consent != .granted { return .needsAttention }
         return friend.aiReplyEnabled ? .active : .off
     }

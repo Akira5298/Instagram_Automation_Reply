@@ -6,7 +6,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response
 from psycopg import AsyncConnection
 
-from app.api.schemas import ExampleCreate, ExampleOut, ProfileOut, TraitCreate, TraitOut, TraitPatch
+from app.api.schemas import (
+    ExampleCreate,
+    ExampleOut,
+    ProfileOut,
+    TraitCreate,
+    TraitOut,
+    TraitPatch,
+)
 from app.core.security import require_user
 from app.db import chat_repo, profile_repo
 from app.db.pool import get_conn

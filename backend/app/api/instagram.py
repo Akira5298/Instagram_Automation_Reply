@@ -7,7 +7,7 @@ import secrets
 from urllib.parse import urlencode
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from psycopg import AsyncConnection
 from pydantic import BaseModel
@@ -18,8 +18,15 @@ from app.core.security import require_user
 from app.db import profile_repo
 from app.db.pool import get_conn
 from app.integrations.meta.instagram_client import GraphError
-from app.integrations.meta.signed_request import SignedRequestError, parse_signed_request
-from app.services.instagram_service import InstagramNotConfigured, InstagramService, OAuthError
+from app.integrations.meta.signed_request import (
+    SignedRequestError,
+    parse_signed_request,
+)
+from app.services.instagram_service import (
+    InstagramNotConfigured,
+    InstagramService,
+    OAuthError,
+)
 
 router = APIRouter(prefix="/v1/instagram", tags=["instagram"])
 

@@ -183,6 +183,12 @@ Test plan:
 
    It arrives in Instagram, after a one-time AI disclosure.
 5. **Reply from the Instagram app.** ECHO records your reply as yours. ECHO never re-processes its own messages when Instagram echoes them back.
+6. **Automatic replies (Phase 5).** With consent granted and AI replies on:
+   - DM your account from the tester. About 45 seconds later (the friend's **Reply after** setting), ECHO answers in your voice, after a one-time disclosure.
+   - Send "can you lend me RM50?" and the reply waits in **Messages → Needs you** instead of being sent.
+   - Reply yourself in Instagram and ECHO steps back for 30 minutes.
+   - The tester sending **STOP** turns AI replies off for them.
+   - Instead of setting consent by hand, try **Ask by DM** on a friend who hasn't agreed yet; their **YES** is recorded automatically.
 
 ### App Review (Advanced Access)
 

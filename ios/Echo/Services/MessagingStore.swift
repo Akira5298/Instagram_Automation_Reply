@@ -13,6 +13,8 @@ final class MessagingStore {
     private(set) var isLoading = false
     var errorMessage: String?
     private(set) var instagramStatus: InstagramStatus?
+    /// Drafts waiting for your OK (Phase 5 review queue).
+    private(set) var reviews: [ReviewItem] = []
 
     private let backend: MessagingBackend
 
@@ -32,6 +34,7 @@ final class MessagingStore {
     var isMock: Bool { !backend.isRemote }
     var friends: [Friend] { conversations.map(\.friend) }
     var unreadActivityCount: Int { activity.filter { $0.readAt == nil }.count }
+    func pendingReviews(for friendID: UUID) -> Int { reviews.filter { $0.friendId == friendID }.count }
     /// Testing tools (simulate a friend's message, sample friends) only work
     /// with the mock Instagram provider.
     var usesMockInstagram: Bool { !isRemote || (instagramStatus?.usesMockInstagram ?? true) }
@@ -46,6 +49,7 @@ final class MessagingStore {
             jobs = try await backend.loadJobs()
             activity = try await backend.loadActivity()
         }
+        reviews = (try? await backend.loadReviews()) ?? reviews
         instagramStatus = try? await backend.loadInstagramStatus()
     }
 
@@ -137,6 +141,76 @@ final class MessagingStore {
         await perform {
             try await backend.simulateInbound(text, from: conversation.friend)
             conversations = try await backend.loadConversations()
+            reviews = try await backend.loadReviews()
+            activity = try await backend.loadActivity()
+        }
+    }
+
+    // MARK: Automatic replies
+
+    func refreshReviews() async {
+        await perform { reviews = try await backend.loadReviews() }
+    }
+
+    /// Send (optionally edited), dismiss, or mark as answered in Instagram.
+    @discardableResult
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String? = nil) async -> Bool {
+        let ok = await perform {
+            try await backend.resolveReview(item, action: action, text: text)
+            reviews.removeAll { $0.id == item.id }
+        }
+        if ok, action == .send {
+            await perform { conversations = try await backend.loadConversations() }
+            if isRemote { await refreshJobs() }
+        }
+        return ok
+    }
+
+    func setTakenOver(_ takenOver: Bool, in conversationID: UUID) async {
+        guard let friend = conversation(id: conversationID)?.friend else { return }
+        await perform {
+            let saved = takenOver ? try await backend.takeOver(friend) : try await backend.handBack(friend)
+            replaceFriend(saved)
+        }
+    }
+
+    @discardableResult
+    func requestConsent(in conversationID: UUID) async -> Bool {
+        guard let friend = conversation(id: conversationID)?.friend else { return false }
+        return await perform {
+            replaceFriend(try await backend.requestConsent(friend))
+            conversations = try await backend.loadConversations()
+        }
+    }
+
+    func style(for friend: Friend) async -> FriendStyle? {
+        do {
+            return try await backend.loadStyle(for: friend)
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func saveStyle(_ style: FriendStyle, for friend: Friend) async -> Bool {
+        await perform { _ = try await backend.saveStyle(style, for: friend) }
+    }
+
+    func loadAutomationSettings() async -> AutomationSettings? {
+        try? await backend.loadAutomationSettings()
+    }
+
+    @discardableResult
+    func saveAutomationSettings(_ settings: AutomationSettings) async -> AutomationSettings? {
+        var saved: AutomationSettings?
+        await perform { saved = try await backend.saveAutomationSettings(settings) }
+        return saved
+    }
+
+    private func replaceFriend(_ friend: Friend) {
+        if let index = conversations.firstIndex(where: { $0.friend.id == friend.id }) {
+            conversations[index].friend = friend
         }
     }
 

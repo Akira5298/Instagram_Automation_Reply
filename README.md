@@ -1,6 +1,15 @@
 # ECHO — AI personal messaging assistant (iOS)
 
-ECHO runs entirely on your Mac: **FastAPI (Python 3.12) + local PostgreSQL + Claude API + a Cloudflare Tunnel** for the public https address Meta needs. There are no hosting costs; you pay only for Claude API usage.
+ECHO runs entirely on your Mac: **FastAPI (Python 3.12) + local PostgreSQL + Claude API + a tunnel** (Cloudflare, or ngrok's free fixed domain via `ECHO_PUBLIC_BASE_URL`) for the public https address Meta needs. There are no hosting costs; you pay only for Claude API usage.
+
+**Phase 5 — automatic replies.** When a friend who agreed DMs you, ECHO answers in your voice:
+- **Gates, in order:** consent, AI on, you haven't taken over, global pause, daily limits, safety check, then Meta's 24-hour window. All of them are deterministic code; Claude only writes the text.
+- **Waits a moment first** (per friend, default 45 s), so a burst of messages gets one reply.
+- **Steps back when you reply yourself**, from ECHO or the Instagram app, for 30 minutes (configurable). You can also "Take over" a chat explicitly.
+- **Holds drafts for you** when a message involves money, plans, commitments, something sensitive or emotional, a photo it can't see, or anything only you can answer. They go to the **Needs you** queue, where you edit, send or dismiss them. You can also set a friend to "check every reply with me".
+- **Consent by DM:** "Ask by DM" sends your consent request; a YES reply grants consent and STOP revokes it, recorded automatically with the message as evidence.
+- **Per-friend reply style:** tone, formality, emoji, length, topics to avoid, custom instructions.
+- **Disclosure:** the AI disclosure message goes out before the first automatic reply, and again after 30 days. Missed messages from while the Mac was off (over 2 hours old) are never answered late.
 
 **Phase 4 — real Instagram.**
 - Meta's Instagram API with Unified Login (sign in with Instagram or Facebook, no Facebook Page needed), with encrypted tokens.
@@ -37,7 +46,7 @@ iOS: `cd ios && xcodegen generate && open Echo.xcodeproj`, then ⌘R. In the app
 
 ## Updating your existing project
 
-1. Copy the new files over your existing project, **keeping your `backend/.env`** and `backend/.venv`.
+1. Copy the new files over your existing project, **keeping your `backend/.env`** and `backend/.venv`. Then run `cd ios && xcodegen generate` so Xcode picks up the new Swift files.
 2. Delete the old `backend/supabase/` folder. Migrations now live in `backend/migrations/`.
 3. Delete `backend/Procfile`. It was only used for Railway.
 4. Run `./scripts/setup_mac.sh`. It adds new packages and settings, and records the migrations you already applied by hand.
@@ -56,11 +65,12 @@ Instagram_App/
 │   │   ├── doctor.py                 # python -m app.doctor   (pre-flight + Meta dashboard URLs)
 │   │   ├── core/public_url.py        # tunnel URL: ECHO_PUBLIC_BASE_URL or backend/.public_url
 │   │   ├── integrations/meta/        # Instagram Graph API client, webhook signatures, signed_request
-│   │   ├── services/                 # chat, scheduler, instagram (connect/refresh/re-subscribe), webhooks
+│   │   ├── services/                 # chat, scheduler, instagram, webhooks, auto_reply (inbound/consent/takeover), delivery
 │   │   ├── worker/runner.py          # scheduler + webhook processing + hourly maintenance
+│   │   ├── worker/auto_reply.py      # Phase 5: automatic-reply pipeline (gates → Claude → send)
 │   │   └── api/                      # /v1/* , /webhooks/meta , /privacy
-│   ├── migrations/0001…0005.sql      # plain PostgreSQL
-│   ├── tests/                        # 124 tests (fake Graph API + real PostgreSQL)
+│   ├── migrations/0001…0007.sql      # plain PostgreSQL
+│   ├── tests/                        # 148 tests (fake Graph API + real PostgreSQL)
 │   └── .env.example
 ├── ios/                              # SwiftUI app (XcodeGen project.yml)
 └── docs/ARCHITECTURE.md, docs/META_SETUP.md
@@ -81,4 +91,4 @@ createdb echo_test   # disposable; tests wipe it
 ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test .venv/bin/python -m pytest -q
 ```
 
-The suite has 124 tests, including the migration runner and tunnel URL resolution. iOS: ⌘U.
+The suite has 148 tests, including the automatic-reply pipeline end to end, the migration runner and tunnel URL resolution. iOS: ⌘U.

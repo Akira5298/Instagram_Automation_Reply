@@ -7,6 +7,8 @@ struct ConversationDetailView: View {
 
     @State private var reply = ""
     @State private var showingSettings = false
+    @State private var showingStyle = false
+    @State private var showingReviews = false
 
     var body: some View {
         ZStack {
@@ -28,8 +30,21 @@ struct ConversationDetailView: View {
             VStack(spacing: EchoSpacing.md) {
                 FriendControlsCard(
                     friend: friend,
-                    automation: conversation.automationState(globalPause: globalPause),
-                    onChange: { change in store.updateFriend(in: conversationID, change) }
+                    automation: conversation.automationState(globalPause: globalPause,
+                                                             pendingReviews: store.pendingReviews(for: friend.id)),
+                    onChange: { change in store.updateFriend(in: conversationID, change) },
+                    pendingReviews: store.pendingReviews(for: friend.id),
+                    onTakeOver: { takeOver in
+                        Haptics.select()
+                        Task { await store.setTakenOver(takeOver, in: conversationID) }
+                    },
+                    onRequestConsent: {
+                        Task {
+                            if await store.requestConsent(in: conversationID) { Haptics.success() }
+                        }
+                    },
+                    onEditStyle: { showingStyle = true },
+                    onOpenReviews: { showingReviews = true }
                 )
 
                 LazyVStack(spacing: EchoSpacing.xs) {
@@ -70,6 +85,13 @@ struct ConversationDetailView: View {
             .background(.ultraThinMaterial)
         }
         .navigationTitle(friend.displayName)
+        .sheet(isPresented: $showingStyle) {
+            FriendStyleSheet(store: store, friend: friend)
+                .presentationDetents([.large])
+        }
+        .sheet(isPresented: $showingReviews) {
+            ReviewQueueView(store: store)
+        }
         .toolbar {
             if store.usesMockInstagram {
             ToolbarItem(placement: .primaryAction) {
@@ -101,6 +123,16 @@ struct FriendControlsCard: View {
     let friend: Friend
     let automation: AutomationState
     let onChange: ((inout Friend) -> Void) -> Void
+    var pendingReviews: Int = 0
+    var onTakeOver: (Bool) -> Void = { _ in }
+    var onRequestConsent: () -> Void = {}
+    var onEditStyle: () -> Void = {}
+    var onOpenReviews: () -> Void = {}
+
+    @State private var confirmingConsentRequest = false
+
+    private static let delays: [(Int, String)] = [(0, "Right away"), (30, "30 seconds"), (45, "45 seconds"),
+                                                   (60, "1 minute"), (300, "5 minutes"), (900, "15 minutes")]
 
     var body: some View {
         VStack(alignment: .leading, spacing: EchoSpacing.sm) {
@@ -167,18 +199,115 @@ struct FriendControlsCard: View {
                 .accessibilityLabel("Consent: \(friend.consent.title). Change")
             }
 
+            if friend.consent == .unknown || friend.consent == .requested {
+                Button {
+                    confirmingConsentRequest = true
+                } label: {
+                    Label(friend.consent == .requested ? "Ask again by DM" : "Ask \(friend.firstName) by DM",
+                          systemImage: "paperplane")
+                }
+                .buttonStyle(.neon(.secondary))
+                .disabled(friend.standardWindowRemaining() == nil)
+                .confirmationDialog("Send your consent request to \(friend.firstName)?",
+                                    isPresented: $confirmingConsentRequest, titleVisibility: .visible) {
+                    Button("Send request") { onRequestConsent() }
+                } message: {
+                    Text("They can reply YES to allow AI-assisted replies, or STOP anytime. ECHO records their answer automatically. You can edit the wording in Settings.")
+                }
+                if friend.standardWindowRemaining() == nil {
+                    Text("You can ask next time \(friend.firstName) messages you (Instagram's 24-hour rule).")
+                        .font(EchoFont.caption)
+                        .foregroundStyle(EchoColor.textTertiary)
+                }
+            }
+
             if friend.aiReplyEnabled && friend.consent != .granted {
                 Label(
-                    "Automatic sending stays off until \(friend.displayName.components(separatedBy: " ").first ?? "they") agree to AI-assisted replies. ECHO will draft and ask you instead.",
+                    "Automatic replies stay off until \(friend.firstName) agrees. ECHO won't reply to them meanwhile.",
                     systemImage: "info.circle"
                 )
                 .font(EchoFont.caption)
                 .foregroundStyle(EchoColor.warning)
             }
+
+            if pendingReviews > 0 {
+                Button(action: onOpenReviews) {
+                    Label(pendingReviews == 1 ? "1 draft waiting for you" : "\(pendingReviews) drafts waiting for you",
+                          systemImage: "exclamationmark.bubble.fill")
+                }
+                .buttonStyle(.neon(.primary))
+            }
+
+            if friend.aiReplyEnabled {
+                Divider().overlay(EchoColor.hairline)
+                autoReplyControls
+            }
         }
         .font(EchoFont.callout)
         .foregroundStyle(EchoColor.textPrimary)
         .glassCard(glow: friend.aiReplyEnabled ? EchoColor.neonPurple : nil)
+    }
+}
+
+extension FriendControlsCard {
+    @ViewBuilder
+    var autoReplyControls: some View {
+        if friend.isTakenOver(), let until = friend.manualOverrideUntil {
+            HStack {
+                Label {
+                    Text("You're handling this chat until ") + Text(until, style: .time)
+                } icon: {
+                    Image(systemName: "person.fill.checkmark")
+                }
+                .font(EchoFont.caption)
+                .foregroundStyle(EchoColor.blocked)
+                Spacer()
+                Button("Hand back") { onTakeOver(false) }
+                    .buttonStyle(.neon(.secondary, fullWidth: false))
+                    .controlSize(.small)
+            }
+        } else {
+            Button {
+                onTakeOver(true)
+            } label: {
+                Label("Take over this chat", systemImage: "hand.raised")
+            }
+            .buttonStyle(.neon(.secondary))
+            .accessibilityHint("ECHO stops replying to \(friend.firstName) for a while")
+        }
+
+        Picker(selection: Binding(
+            get: { friend.replyDelaySeconds ?? 45 },
+            set: { newValue in onChange { $0.replyDelaySeconds = newValue } }
+        )) {
+            ForEach(Self.delays, id: \.0) { option in
+                Text(option.1).tag(option.0)
+            }
+        } label: {
+            Label("Reply after", systemImage: "timer")
+        }
+        .tint(EchoColor.cyan)
+
+        Toggle(isOn: Binding(
+            get: { friend.reviewFirst ?? false },
+            set: { newValue in
+                Haptics.select()
+                onChange { $0.reviewFirst = newValue }
+            }
+        )) {
+            Label("Check every reply with me", systemImage: "checkmark.bubble")
+        }
+        .tint(EchoColor.neonPurple)
+
+        Button(action: onEditStyle) {
+            Label("Reply style for \(friend.firstName)", systemImage: "slider.horizontal.3")
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .foregroundStyle(EchoColor.cyan)
+
+        Text("ECHO waits a moment so several messages get one reply, and steps back for a while whenever you reply yourself. Money, plans, photos and anything only you can answer always come to you first.")
+            .font(EchoFont.caption)
+            .foregroundStyle(EchoColor.textTertiary)
     }
 }
 

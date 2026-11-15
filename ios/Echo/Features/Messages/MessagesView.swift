@@ -4,6 +4,7 @@ struct MessagesView: View {
     @Bindable var viewModel: MessagesViewModel
     @Binding var settings: AppSettings
     var onTogglePause: (Bool) -> Void = { _ in }
+    @State private var showingReviews = false
 
     var body: some View {
         NavigationStack {
@@ -12,6 +13,10 @@ struct MessagesView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: EchoSpacing.md) {
                         AutomationBanner(settings: $settings, onTogglePause: onTogglePause, automatedCount: viewModel.automatedCount)
+
+                        if !viewModel.store.reviews.isEmpty {
+                            ReviewBanner(count: viewModel.store.reviews.count) { showingReviews = true }
+                        }
 
                         if viewModel.isMock {
                             Label("Offline sample conversations — connect your backend in Settings", systemImage: "testtube.2")
@@ -30,7 +35,9 @@ struct MessagesView: View {
                                 NavigationLink(value: conversation.id) {
                                     ConversationRow(
                                         conversation: conversation,
-                                        automation: conversation.automationState(globalPause: settings.automationPaused)
+                                        automation: conversation.automationState(
+                                            globalPause: settings.automationPaused,
+                                            pendingReviews: viewModel.store.pendingReviews(for: conversation.friend.id))
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -66,6 +73,9 @@ struct MessagesView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(viewModel.store.errorMessage ?? "")
+            }
+            .sheet(isPresented: $showingReviews) {
+                ReviewQueueView(store: viewModel.store)
             }
             .navigationDestination(for: UUID.self) { id in
                 ConversationDetailView(store: viewModel.store, conversationID: id, globalPause: settings.automationPaused)

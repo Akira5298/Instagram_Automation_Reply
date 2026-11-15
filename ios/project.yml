@@ -3,7 +3,7 @@
 #   cd ios && xcodegen generate && open Echo.xcodeproj
 name: Echo
 options:
-  bundleIdPrefix: com.akira       # change to your own reverse-DNS prefix
+  bundleIdPrefix: com.yourname        # change to your own reverse-DNS prefix
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -22,7 +22,7 @@ targets:
       - path: Echo
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.akira.echo
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.echo
         PRODUCT_NAME: Echo
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
@@ -45,7 +45,7 @@ targets:
       - target: Echo
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.akira.echo.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.echo.tests
         GENERATE_INFOPLIST_FILE: YES
         BUNDLE_LOADER: "$(TEST_HOST)"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Echo.app/Echo"

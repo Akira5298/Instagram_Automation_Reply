@@ -22,9 +22,11 @@ import anthropic
 from app.ai.prompts import (
     CHAT_SYSTEM_PROMPT,
     COMPOSE_SYSTEM_PROMPT,
+    REPLY_SYSTEM_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
     chat_output_schema,
     compose_output_schema,
+    reply_output_schema,
 )
 from app.ai.provider import (
     AIBadOutput,
@@ -33,6 +35,7 @@ from app.ai.provider import (
     AIRefused,
     AssistantTurn,
     ComposedMessage,
+    ReplyDraft,
     SummaryResult,
     Usage,
 )
@@ -77,6 +80,7 @@ class AnthropicProvider:
         self.thinking = settings.anthropic_chat_thinking
         self._schema = chat_output_schema()
         self._compose_schema = compose_output_schema()
+        self._reply_schema = reply_output_schema()
 
     async def chat_turn(self, context_block: str, messages: list[dict]) -> AssistantTurn:
         kwargs: dict[str, Any] = {
@@ -170,6 +174,50 @@ class AnthropicProvider:
         except (ValueError, KeyError, TypeError) as exc:
             raise AIBadOutput(f"unparseable draft: {exc}") from exc
         return ComposedMessage(
+            text=text,
+            language=str(data.get("language") or "en")[:16],
+            flags=[str(f) for f in flags],
+            note=str(data.get("note") or "")[:300],
+            model=response.model,
+            usage=_usage(response),
+        )
+
+    async def draft_reply(self, context_block: str) -> ReplyDraft:
+        kwargs: dict[str, Any] = {
+            "model": self.chat_model,
+            "max_tokens": 1024,
+            "system": [
+                {"type": "text", "text": REPLY_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": context_block},
+            ],
+            "messages": [{"role": "user", "content": "Draft the reply to the [unanswered] messages now."}],
+            "output_config": {
+                "effort": self.effort,
+                "format": {"type": "json_schema", "schema": self._reply_schema},
+            },
+        }
+        if self.thinking != "omit":
+            kwargs["thinking"] = {"type": self.thinking}
+        response = await self._call(**kwargs)
+        if response.stop_reason == "refusal":
+            raise AIRefused("reply refused")
+        if response.stop_reason == "max_tokens":
+            raise AIBadOutput("reply truncated")
+        try:
+            data = json.loads(_first_text(response))
+            action = str(data["action"])
+            if action not in ("reply", "no_reply", "needs_user"):
+                raise ValueError(f"bad action {action!r}")
+            text = str(data.get("message") or "").strip()
+            if action == "reply" and not text:
+                raise ValueError("empty reply")
+            flags = data.get("flags") or []
+            if not isinstance(flags, list):
+                raise ValueError("bad flags")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise AIBadOutput(f"unparseable reply: {exc}") from exc
+        return ReplyDraft(
+            action=action,
             text=text,
             language=str(data.get("language") or "en")[:16],
             flags=[str(f) for f in flags],

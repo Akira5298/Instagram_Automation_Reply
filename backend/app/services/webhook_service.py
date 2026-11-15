@@ -14,7 +14,9 @@ Processing (worker, outside the request):
   * normal inbound                           → friend found/created (AI off,
     consent unknown), message stored, 24-hour window opened.
   * everything else (reactions, seen, …)     → ignored for now
-Automatic replies to inbound messages arrive in Phase 5.
+Phase 5: inbound messages go through app.services.auto_reply.on_inbound
+(STOP/YES consent keywords, then a pending auto reply); your own replies from
+the Instagram app go through on_manual_outbound (ECHO steps back).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from app.db import messaging_repo
+from app.services import auto_reply
 from app.services.instagram_service import InstagramService
 
 log = logging.getLogger("echo.webhooks")
@@ -148,6 +151,8 @@ class WebhookProcessor:
             if friend:
                 await messaging_repo.record_outbound(conn, user_id=account["user_id"], friend_id=friend["id"],
                                                      text=text or "", mid=mid, sent_by="user_manual", at=at)
+                await auto_reply.on_manual_outbound(conn, user_id=account["user_id"], friend_id=friend["id"],
+                                                    at=max(at, self.clock()))
             return "done"
 
         if not sender or sender == account["ig_user_id"]:
@@ -156,6 +161,10 @@ class WebhookProcessor:
             if self.instagram else None
         if friend is None:
             return "ignored"
+        if await messaging_repo.message_exists(conn, mid):
+            return "ignored"
         await messaging_repo.record_inbound(conn, user_id=account["user_id"], friend_id=friend["id"],
                                             text=text or "", mid=mid, at=at)
+        await auto_reply.on_inbound(conn, user_id=account["user_id"], friend=friend, mid=mid, text=text,
+                                    at=at, now=self.clock())
         return "done"

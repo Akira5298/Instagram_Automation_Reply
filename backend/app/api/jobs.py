@@ -13,8 +13,21 @@ from app.core.security import require_user
 from app.db import jobs_repo, profile_repo
 from app.db.pool import get_conn
 from app.domain.job_state import RunStatus, can_transition
-from app.domain.recurrence import RecurrenceError, first_occurrence, normalise_rrule, to_local_naive, zone
-from app.services.scheduler_service import JobRequest, ScheduleError, create_job, job_to_out, run_to_out, utcnow
+from app.domain.recurrence import (
+    RecurrenceError,
+    first_occurrence,
+    normalise_rrule,
+    to_local_naive,
+    zone,
+)
+from app.services.scheduler_service import (
+    JobRequest,
+    ScheduleError,
+    create_job,
+    job_to_out,
+    run_to_out,
+    utcnow,
+)
 
 router = APIRouter(prefix="/v1/jobs", tags=["scheduler"])
 

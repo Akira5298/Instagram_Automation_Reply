@@ -1,6 +1,7 @@
-"""Durable scheduled-message worker.
+"""Durable worker: scheduled messages and (Phase 5) automatic replies.
 
 Each tick:
+  0. Process stored webhooks, then due automatic replies (app/worker/auto_reply.py).
   1. Recover runs whose worker died (expired leases).
   2. Materialise due jobs into job_runs (one row per occurrence, idempotent).
      Occurrences missed while the server was down are skipped; only the most
@@ -33,17 +34,36 @@ from app.ai.compose_context import build_compose_context
 from app.ai.provider import AIError, AIProvider
 from app.core.config import Settings
 from app.db import jobs_repo, messaging_repo, profile_repo
-from app.domain.job_state import MAX_ATTEMPTS, RunStatus, can_transition, retry_delay_seconds
-from app.domain.messaging_window import BlockReason, EligibilityInput, evaluate_send_eligibility
+from app.domain.job_state import (
+    MAX_ATTEMPTS,
+    RunStatus,
+    can_transition,
+    retry_delay_seconds,
+)
+from app.domain.messaging_window import (
+    BlockReason,
+    EligibilityInput,
+    evaluate_send_eligibility,
+)
 from app.domain.recurrence import LATE_LIMIT, latest_due, to_local_naive, zone
-from app.domain.safety import REASON_TEXT, fits_instagram, keyword_flags, normalise_flags
+from app.domain.safety import (
+    REASON_TEXT,
+    fits_instagram,
+    keyword_flags,
+    normalise_flags,
+)
 from app.messaging.provider import (
     MessagingProvider,
     PermanentSendError,
     TransientSendError,
     UnknownOutcome,
 )
-from app.services.notifications import LogNotificationSender, NotificationSender, dispatch_pending, notify
+from app.services.notifications import (
+    LogNotificationSender,
+    NotificationSender,
+    dispatch_pending,
+    notify,
+)
 
 log = logging.getLogger("echo.worker")
 
@@ -74,6 +94,11 @@ class WorkerStats:
     cancelled: int = 0
     notifications: int = 0
     webhooks: int = 0
+    replies_sent: int = 0
+    replies_held: int = 0
+    replies_skipped: int = 0
+    replies_blocked: int = 0
+    replies_failed: int = 0
 
 
 class Worker:
@@ -102,6 +127,12 @@ class Worker:
         self.webhooks = webhooks          # WebhookProcessor (Phase 4)
         self.instagram = instagram        # InstagramService, for token refresh
         self._last_maintenance: datetime | None = None
+        from app.worker.auto_reply import AutoReplyProcessor
+
+        self.auto_replies = AutoReplyProcessor(
+            pool=pool, ai=ai, messaging=messaging, settings=settings, clock=self.clock,
+            worker_id=self.worker_id, lease=lease,
+        )
 
     # ------------------------------------------------------------------ loop
 
@@ -110,7 +141,8 @@ class Worker:
         while not stop.is_set():
             try:
                 stats = await self.run_once()
-                if stats.processed or stats.materialized or stats.recovered or stats.webhooks:
+                if (stats.processed or stats.materialized or stats.recovered or stats.webhooks
+                        or stats.replies_sent or stats.replies_held or stats.replies_blocked):
                     log.info("worker tick", extra={"fields": stats.__dict__})
             except Exception:
                 log.exception("worker tick failed")
@@ -125,6 +157,10 @@ class Worker:
         if self.webhooks is not None:
             stats.webhooks = await self.webhooks.process_pending()
         await self._maintenance(now)
+        replies = await self.auto_replies.run(self.clock())
+        stats.replies_sent, stats.replies_held = replies.sent, replies.held
+        stats.replies_skipped, stats.replies_blocked = replies.skipped, replies.blocked
+        stats.replies_failed = replies.failed
         await self._recover_expired_leases(now, stats)
         await self._materialize_due_jobs(now, stats)
         for run_id in await self._claim_runs(now):

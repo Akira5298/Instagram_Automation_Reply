@@ -10,7 +10,17 @@ from fastapi.responses import JSONResponse
 
 from app.ai.mock_provider import MockAIProvider
 from app.ai.provider import AIError, AIProvider, AIRateLimited
-from app.api import chat, dev, friends, health, instagram, jobs, profile, webhooks
+from app.api import (
+    chat,
+    dev,
+    friends,
+    health,
+    instagram,
+    jobs,
+    profile,
+    reviews,
+    webhooks,
+)
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.pool import create_pool, ensure_owner
@@ -29,7 +39,12 @@ def build_provider(settings: Settings) -> AIProvider:
 
 def build_instagram(settings: Settings):
     """InstagramService when Meta credentials are configured, else None."""
-    from app.services.instagram_service import InstagramNotConfigured, InstagramService, make_cipher, make_client
+    from app.services.instagram_service import (
+        InstagramNotConfigured,
+        InstagramService,
+        make_cipher,
+        make_client,
+    )
 
     try:
         return InstagramService(settings=settings, client=make_client(settings), cipher=make_cipher(settings))
@@ -99,7 +114,7 @@ def create_app(
             if app.state.instagram is not None:
                 await app.state.instagram.client.aclose()
 
-    app = FastAPI(title="ECHO backend", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="ECHO backend", version="0.5.0", lifespan=lifespan)
     app.dependency_overrides[get_settings] = lambda: settings
 
     @app.middleware("http")
@@ -119,6 +134,7 @@ def create_app(
     app.include_router(profile.router)
     app.include_router(jobs.router)
     app.include_router(friends.router)
+    app.include_router(reviews.router)
     app.include_router(dev.router)
     app.include_router(instagram.router)
     app.include_router(instagram.public_router)

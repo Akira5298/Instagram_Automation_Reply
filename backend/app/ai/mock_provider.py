@@ -5,19 +5,19 @@ from __future__ import annotations
 
 import re
 
-from app.ai.provider import AssistantTurn, ComposedMessage, SummaryResult
+from app.ai.provider import AssistantTurn, ComposedMessage, ReplyDraft, SummaryResult
 from app.domain.safety import keyword_flags
 
 _SLANG = {"lol", "lmao", "ngl", "tbh", "idk", "omg", "bruh", "fr", "btw", "rn"}
 _ITALIAN = {"ciao", "grazie", "sono", "come", "stai", "anche", "perché", "molto", "oggi", "piace"}
-_INTEREST = re.compile(r"\bi\s+(?:really\s+)?(?:love|like|enjoy|am into|'m into)\s+([^.,!?\n]{2,40})", re.I)
+_INTEREST = re.compile(r"\bi\s+(?:really\s+)?(?:love|like|enjoy|am into|'m into)\s+([^.,!?\n]{2,40})", re.IGNORECASE)
 # "send kenji a message at 8pm tomorrow asking ..." (mock scheduling)
 _SCHEDULE = re.compile(
     r"\b(?:send|message|text)\s+(?P<name>[A-Za-z]+)\b.*?\bat\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?"
     r"\s*(?P<day>today|tonight|tomorrow)?(?:.*?\b(?:asking|to say|saying|about)\s+(?P<what>[^.!?]+))?",
-    re.I,
+    re.IGNORECASE,
 )
-_NOT_ANYMORE = re.compile(r"\bi(?:'m| am)\s+not\s+into\s+([^.,!?\n]{2,40})\s+anymore", re.I)
+_NOT_ANYMORE = re.compile(r"\bi(?:'m| am)\s+not\s+into\s+([^.,!?\n]{2,40})\s+anymore", re.IGNORECASE)
 
 
 def detect_language(text: str) -> str:
@@ -82,6 +82,9 @@ class MockAIProvider:
         merged = f"{previous_summary}\n{bullets}" if previous_summary else bullets
         return SummaryResult(text=merged.strip()[-2000:])
 
+    async def draft_reply(self, context_block: str) -> ReplyDraft:
+        return await _mock_draft_reply(context_block)
+
     async def compose_message(self, context_block: str, instruction: str) -> ComposedMessage:
         style = "close_friend"
         m = re.search(r"preset=(\w+)", context_block)
@@ -99,6 +102,32 @@ class MockAIProvider:
                                note="mock flag" if flags else "")
 
 
+_NO_REPLY = re.compile(r"^\s*(ok(ay)?|k|thanks?|thx|ty|haha+|lol|👍|❤️|🙏|😂|gn|good ?night)\s*[.!]*\s*$", re.IGNORECASE)
+
+
+def _unanswered(context_block: str) -> list[str]:
+    return [line.split("Friend [unanswered]:", 1)[1].strip()
+            for line in context_block.splitlines() if "Friend [unanswered]:" in line]
+
+
+async def _mock_draft_reply(context_block: str) -> ReplyDraft:
+    pending = _unanswered(context_block)
+    last = pending[-1] if pending else ""
+    if last and _NO_REPLY.match(last):
+        return ReplyDraft(action="no_reply", text="", language="en", note="nothing to answer")
+    if last.startswith("[") and last.endswith("]"):
+        return ReplyDraft(action="needs_user", text="[mock] nice! what's that?", language="en",
+                          note="attachment ECHO can't see")
+    flags = sorted(keyword_flags(*pending))
+    if "free" in last.lower() or "when" in last.lower():
+        return ReplyDraft(action="needs_user", text="[mock] let me check and get back to you [time]",
+                          language="en", flags=flags or ["unknown_info"], note="asks about your plans")
+    style = re.search(r"preset=(\w+)", context_block)
+    prefix = "Hello! " if style and style.group(1) == "professional" else "haha "
+    return ReplyDraft(action="reply", text=f"[mock] {prefix}{last.lower()[:60] or 'hey'} 😄", language="en",
+                      flags=flags, note="mock flag" if flags else "")
+
+
 def _mock_schedule(match: re.Match, context_block: str, user_text: str) -> dict:
     from datetime import datetime, timedelta
 
@@ -110,11 +139,11 @@ def _mock_schedule(match: re.Match, context_block: str, user_text: str) -> dict:
         hour += 12
     day = (match.group("day") or "").lower()
     date = today + timedelta(days=1) if day == "tomorrow" else today
-    recurrence = "daily" if re.search(r"\bevery ?day\b|\bdaily\b", user_text, re.I) else "once"
+    recurrence = "daily" if re.search(r"\bevery ?day\b|\bdaily\b", user_text, re.IGNORECASE) else "once"
     return {
         "friend_name": match.group("name"),
         "local_datetime": f"{date:%Y-%m-%d}T{hour:02d}:{minute:02d}",
         "recurrence": recurrence,
         "instruction": (match.group("what") or "say hi").strip(),
-        "send_automatically": not re.search(r"\b(?:review|check with me|ask me first)\b", user_text, re.I),
+        "send_automatically": not re.search(r"\b(?:review|check with me|ask me first)\b", user_text, re.IGNORECASE),
     }

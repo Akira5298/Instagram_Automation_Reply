@@ -13,7 +13,8 @@ FRIEND_COLUMNS = """
     f.relationship_preset as style, coalesce(f.language, '') as language,
     f.ai_reply_enabled, f.consent_status as consent,
     f.last_inbound_message_at as last_inbound_at, f.manual_override_until,
-    f.instagram_account_id, f.disclosure_sent_at
+    f.instagram_account_id, f.disclosure_sent_at,
+    f.auto_reply_delay_seconds, f.auto_reply_require_review, f.auto_reply_daily_limit
 """
 
 
@@ -110,6 +111,9 @@ async def update_friend(conn: AsyncConnection, user_id: UUID, friend_id: UUID, c
         "language": "language",
         "consent": "consent_status",
         "manual_override_until": "manual_override_until",
+        "reply_delay_seconds": "auto_reply_delay_seconds",
+        "review_first": "auto_reply_require_review",
+        "daily_reply_limit": "auto_reply_daily_limit",
     }
     sets = [f"{columns[k]} = %s" for k in changes if k in columns]
     if not sets:

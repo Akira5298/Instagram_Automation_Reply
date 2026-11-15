@@ -10,7 +10,12 @@ import httpx
 from psycopg_pool import AsyncConnectionPool
 
 from app.integrations.meta.instagram_client import GraphError
-from app.messaging.provider import PermanentSendError, SendResult, TransientSendError, UnknownOutcome
+from app.messaging.provider import (
+    PermanentSendError,
+    SendResult,
+    TransientSendError,
+    UnknownOutcome,
+)
 from app.services.instagram_service import InstagramService
 
 

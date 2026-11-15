@@ -46,6 +46,19 @@ class ComposedMessage:
     usage: Usage = field(default_factory=Usage)
 
 
+@dataclass(frozen=True)
+class ReplyDraft:
+    """A reply to a friend's DM in the user's voice."""
+
+    action: str  # "reply" | "no_reply" | "needs_user"
+    text: str
+    language: str
+    flags: list[str] = field(default_factory=list)
+    note: str = ""
+    model: str = "mock"
+    usage: Usage = field(default_factory=Usage)
+
+
 class AIError(Exception):
     """Base class for provider failures the API maps to friendly errors."""
 
@@ -77,4 +90,8 @@ class AIProvider(Protocol):
 
     async def compose_message(self, context_block: str, instruction: str) -> ComposedMessage:
         """Draft a message to a friend in the user's voice."""
+        ...
+
+    async def draft_reply(self, context_block: str) -> ReplyDraft:
+        """Draft a reply to the friend's unanswered messages (or decide not to)."""
         ...

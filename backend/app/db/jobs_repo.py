@@ -154,16 +154,17 @@ async def update_run(conn: AsyncConnection, run_id: UUID, changes: dict[str, Any
 
 async def reserve_outbound(
     conn: AsyncConnection, *, user_id: UUID, friend_id: UUID, idempotency_key: str, content: str,
-    job_run_id: UUID | None,
+    job_run_id: UUID | None, reply_to_inbound_id: str | None = None,
 ) -> dict[str, Any]:
     cur = await conn.execute(
         """
-        insert into outbound_messages (user_id, friend_id, idempotency_key, job_run_id, content, status)
-        values (%s, %s, %s, %s, %s, 'sending')
+        insert into outbound_messages (user_id, friend_id, idempotency_key, job_run_id, content, status,
+                                       reply_to_inbound_id)
+        values (%s, %s, %s, %s, %s, 'sending', %s)
         on conflict (idempotency_key) do update set attempt_count = outbound_messages.attempt_count
         returning id, status, ig_message_id, attempt_count
         """,
-        (user_id, friend_id, idempotency_key, job_run_id, content),
+        (user_id, friend_id, idempotency_key, job_run_id, content, reply_to_inbound_id),
     )
     row = await cur.fetchone()
     assert row is not None

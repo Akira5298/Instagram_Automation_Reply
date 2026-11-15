@@ -16,6 +16,7 @@ from app.core.config import Settings, get_settings
 from app.core.security import require_user
 from app.db import messaging_repo
 from app.db.pool import get_conn
+from app.services import auto_reply
 
 
 def _dev_only(settings: Settings = Depends(get_settings)) -> None:
@@ -80,9 +81,11 @@ async def simulate_inbound(friend_id: UUID, body: InboundMessage, user_id: UUID 
     friend = await messaging_repo.get_friend(conn, user_id, friend_id)
     if friend is None:
         raise HTTPException(status_code=404, detail="friend not found")
-    await messaging_repo.record_inbound(conn, user_id=user_id, friend_id=friend_id, text=body.text,
-                                        mid=f"mock.in.{uuid.uuid4().hex[:12]}", at=datetime.now(UTC))
-    return {"ok": True}
+    mid, now = f"mock.in.{uuid.uuid4().hex[:12]}", datetime.now(UTC)
+    await messaging_repo.record_inbound(conn, user_id=user_id, friend_id=friend_id, text=body.text, mid=mid, at=now)
+    outcome = await auto_reply.on_inbound(conn, user_id=user_id, friend=friend, mid=mid, text=body.text,
+                                          at=now, now=now)
+    return {"ok": True, "auto_reply": outcome}
 
 
 @router.put("/mock-provider")

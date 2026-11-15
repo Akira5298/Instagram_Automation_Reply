@@ -1,6 +1,6 @@
 # ECHO — Architecture Overview
 
-*Updated for Phase 4 (local Mac deployment) · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
+*Updated for Phase 5 (automatic replies) · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
 
 ## 1. The short version
 
@@ -106,23 +106,33 @@ flowchart LR
 6. **One transaction** stores the reply, the merged traits and an audit entry. Traits are row-locked, so concurrent turns can't lose evidence.
 7. **Rolling summary.** Once 28 messages have built up since the last summary, a background task folds all but the newest 12 into it using `claude-haiku-5-5`. An advisory lock makes sure only one summary runs at a time.
 
-### 3.2 Automatic reply to an incoming DM (Feature 3)
+### 3.2 Automatic reply to an incoming DM (Feature 3) — implemented in Phase 5
 
 ```
 Meta webhook ─▶ verify X-Hub-Signature-256 ─▶ INSERT webhook_events (event_key UNIQUE) ─▶ 200 OK fast
-                                                         │
-Worker claims event ─▶ ignore echoes of our own sends (loop guard)
-  ─▶ upsert ig_messages, set friends.last_inbound_message_at
-  ─▶ ELIGIBILITY GATE (deterministic): global pause? friend AI on? manual takeover?
-                                        consent granted? inside 24h window (−5 min margin)?
-        └─ fail ─▶ no send; optional draft + notification
-  ─▶ build context (profile + friend profile + friend memory + recent thread)
-  ─▶ Claude drafts reply + classifies: money / commitment / sensitive / unknown info / emotional
-  ─▶ SAFETY GATE: any flag ─▶ review_items (needs_attention) + push; stop
-  ─▶ INSERT outbound_messages (reply_to_inbound_id UNIQUE → max one auto reply per inbound)
-  ─▶ re-check eligibility ─▶ POST graph.facebook.com/<version>/<IG_ID>/messages
-  ─▶ mark sent / retry with backoff / unknown → reconcile ─▶ audit_log + notification_outbox
+Worker: process webhook ─▶ ignore echoes of our own sends (mid already stored = loop guard)
+  inbound ─▶ store message, open 24h window ─▶ services/auto_reply.on_inbound
+     "STOP"            ─▶ consent revoked + AI off + consent_events(dm_keyword_stop) + notify; nothing sent
+     "YES" (requested) ─▶ consent granted + consent_events(dm_reply, evidence = mid); nothing sent
+     AI on + consent   ─▶ auto_replies row, due = now + friend delay; a newer message supersedes it
+  your own reply (Instagram app echo, or typed in ECHO) ─▶ on_manual_outbound:
+     cancel waiting replies + manual_override_until = now + takeover_minutes
+Worker: claim due auto_replies (FOR UPDATE SKIP LOCKED, lease) ─▶ worker/auto_reply.py
+  1 stale? newer message → superseded · someone replied after it → skipped
+  2 pause / AI off / no consent / taken over → skipped · older than 2 h → blocked + notify
+  3 daily limit (per friend, per account) → blocked + notify (once a day)
+  4 Claude (REPLY_SYSTEM_PROMPT): action reply | no_reply | needs_user, text, flags
+  5 SAFETY GATE: model flags ∪ keyword pass (friend's messages + draft) ∪ attachment ∪ needs_user
+       ∪ "review first" → needs_attention + review_items + notify; stop
+  6 stale again? (drafting takes seconds)
+  7 evaluate_send_eligibility() on fresh state (24h window −5 min, consent, AI, takeover, pause, account)
+  8 services/delivery.deliver: outbound ledger (idempotency key auto:<mid>, reply_to_inbound_id UNIQUE)
+       → disclosure if due → POST graph.facebook.com/<v>/<IG_ID>/messages → record as echo_auto → notify
+  errors: transient → retry with backoff (re-runs every gate) · unknown outcome → failed, never retried
+Review queue (/v1/reviews): send (edited or not; consent + window + account re-checked) · dismiss · sent_manually
 ```
+
+The model never decides whether a message may be sent; it only drafts and raises flags. Every flag can only *hold* a reply, never release one.
 
 ### 3.3 Scheduled message (Feature 4)
 
@@ -296,5 +306,5 @@ Moving to a hosted server later needs no code changes. Set `ECHO_PUBLIC_BASE_URL
 | 2 | Claude via FastAPI, chat persistence, profile learning and memory, writing examples, Keychain token, mock ↔ backend switch | ✅ |
 | 3 | Scheduler: jobs/friends/automation APIs, durable worker, DST-safe RRULE, safety + eligibility gates, mock messaging provider, activity feed, chat-created jobs | ✅ |
 | 4 | Instagram API with Unified Login (Facebook Login for Business + config_id; legacy Instagram Login optional), encrypted tokens, signed webhooks → inbound/echo processing, Graph API delivery, conversation sync, deauthorize/data-deletion callbacks, privacy page, Meta setup + App Review guide | ✅ |
-| 5 | Autonomous replies, friend controls, consent and safety gates end to end | next |
-| 6 | Polish, APNs push delivery, security review, deploy, TestFlight (optional: Sign in with Apple) | |
+| 5 | Autonomous replies (debounced, gated, idempotent), review queue with edit-and-send, takeover (manual and automatic), consent by DM (YES/STOP), per-friend delay/review/limits/style, account settings | ✅ |
+| 6 | Polish, APNs push delivery, quiet hours, friend memories UI, security review, TestFlight (optional: Sign in with Apple) | next |

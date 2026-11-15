@@ -479,3 +479,54 @@ final class BackendContractTests: XCTestCase {
         XCTAssertEqual(AppModel.resolveMode(settings: settings, token: "t"), .backend(URL(string: "http://192.168.1.20:8000")!))
     }
 }
+
+// MARK: - Phase 5: automatic replies
+
+@MainActor
+final class AutoReplyTests: XCTestCase {
+    func testReviewItemDecodesServerJSON() throws {
+        let json = """
+        {"id": "7d1c1a3e-0000-4000-8000-000000000001", "origin": "auto_reply",
+         "friend_id": "7d1c1a3e-0000-4000-8000-000000000002", "friend_name": "Mika Sato",
+         "reason": "money", "reason_text": "mentions money or payments", "draft": "sorry, can't",
+         "inbound_text": "lend me RM50?", "created_at": "2026-11-13T07:00:00Z",
+         "window_expires_at": "2026-11-14T07:00:00Z", "status": "open"}
+        """.data(using: .utf8)!
+        let item: ReviewItem = try JSONDecoderBox.decode(json)
+        XCTAssertEqual(item.origin, .autoReply)
+        XCTAssertEqual(item.friendName, "Mika Sato")
+        XCTAssertEqual(item.systemImage, "dollarsign.circle")
+        XCTAssertTrue(item.windowOpen(now: ISO8601DateFormatter().date(from: "2026-11-13T08:00:00Z")!))
+    }
+
+    func testTakeoverChangesAutomationState() {
+        var friend = Friend(id: UUID(), igsid: "x", displayName: "Mika", username: "mika", style: .closeFriend,
+                            language: "en", aiReplyEnabled: true, consent: .granted, lastInboundAt: .now)
+        var conversation = ConversationSummary(id: friend.id, friend: friend, messages: [], unreadCount: 0)
+        XCTAssertEqual(conversation.automationState(globalPause: false), .active)
+        friend.manualOverrideUntil = .now.addingTimeInterval(600)
+        conversation.friend = friend
+        XCTAssertEqual(conversation.automationState(globalPause: false), .takenOver)
+        XCTAssertEqual(conversation.automationState(globalPause: false, pendingReviews: 1), .needsAttention)
+        XCTAssertEqual(conversation.automationState(globalPause: true), .paused)
+    }
+
+    func testOfflineModeRepliesOrAsksYou() async throws {
+        let store = MessagingStore.mock()
+        guard let conversation = store.conversations.first else { return XCTFail("no sample data") }
+        store.updateFriend(in: conversation.id) {
+            $0.aiReplyEnabled = true
+            $0.consent = .granted
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        await store.simulateInbound("how was the gig", in: conversation.id)
+        XCTAssertEqual(store.conversation(id: conversation.id)?.messages.last?.sender, .echoAuto)
+
+        await store.simulateInbound("can you lend me RM50", in: conversation.id)
+        XCTAssertEqual(store.reviews.count, 1)
+        let review = try XCTUnwrap(store.reviews.first)
+        await store.resolveReview(review, action: .send, text: "sorry, can't this week")
+        XCTAssertTrue(store.reviews.isEmpty)
+        XCTAssertEqual(store.conversation(id: conversation.id)?.messages.last?.text, "sorry, can't this week")
+    }
+}

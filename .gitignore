@@ -1,41 +1,7 @@
-# ECHO secrets and configuration
 backend/.env
-backend/.env.*
-!backend/.env.example
 backend/.public_url
-
-# Python
 backend/.venv/
-venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-.ruff_cache/
-
-# Logs and local data
 logs/
-*.log
-*.sqlite
-*.sqlite3
-*.sql
-*.dump
-
-# macOS
-.DS_Store
-
-# Xcode
+__pycache__/
+.pytest_cache/
 ios/Echo.xcodeproj/
-DerivedData/
-build/
-xcuserdata/
-*.xcuserstate
-*.ipa
-*.mobileprovision
-
-# Sensitive certificates and keys
-*.pem
-*.p12
-*.key
-
-# Archives
-*.zip

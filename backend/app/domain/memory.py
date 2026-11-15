@@ -43,7 +43,7 @@ _KEY_CLEAN = re.compile(r"[^a-z0-9_.]+")
 _PII_PATTERNS = (
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),                 # e-mail
     re.compile(r"(?:\+?\d[\s-]?){8,}"),                       # phone / card / ID numbers
-    re.compile(r"\b(?:password|passcode|pin|otp)\b", re.I),
+    re.compile(r"\b(?:password|passcode|pin|otp)\b", re.IGNORECASE),
 )
 
 

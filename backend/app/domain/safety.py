@@ -63,4 +63,7 @@ REASON_TEXT = {
     "emotional": "is emotionally serious",
     "too_long": "is longer than Instagram allows",
     "automation_off": "is set to draft-only",
+    "needs_you": "needs an answer only you can give",
+    "attachment": "includes a photo, video or voice message ECHO can't see",
+    "review_first": "is set to check every reply with you first",
 }
