@@ -146,6 +146,63 @@ final class MessagingStore {
         }
     }
 
+    // MARK: Push, notification preferences, memories (Phase 6)
+
+    private var registeredToken: String?
+
+    /// Sends the APNs token to your server (once per token per launch).
+    func registerDevice(token: String) async {
+        guard isRemote, token != registeredToken else { return }
+        do {
+            try await backend.registerDevice(token: token, environment: PushManager.environment)
+            registeredToken = token
+        } catch {
+            // Quietly retried next launch; the server may simply be offline.
+        }
+    }
+
+    func sendTestPush() async -> String {
+        do {
+            return try await backend.sendTestPush()
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func loadNotificationPreferences() async -> NotificationPreferences? {
+        try? await backend.loadNotificationPreferences()
+    }
+
+    func saveNotificationPreferences(_ preferences: NotificationPreferences) async {
+        await perform { try await backend.saveNotificationPreferences(preferences) }
+    }
+
+    func memories(for friend: Friend) async -> [FriendMemory] {
+        do {
+            return try await backend.loadMemories(for: friend)
+        } catch {
+            errorMessage = error.localizedDescription
+            return []
+        }
+    }
+
+    func addMemory(_ content: String, sensitive: Bool, for friend: Friend) async -> FriendMemory? {
+        var created: FriendMemory?
+        await perform { created = try await backend.addMemory(content, sensitive: sensitive, for: friend) }
+        return created
+    }
+
+    func updateMemory(_ memory: FriendMemory) async -> FriendMemory? {
+        var updated: FriendMemory?
+        await perform { updated = try await backend.updateMemory(memory) }
+        return updated
+    }
+
+    @discardableResult
+    func deleteMemory(_ memory: FriendMemory) async -> Bool {
+        await perform { try await backend.deleteMemory(memory) }
+    }
+
     // MARK: Live updates
 
     /// Keeps one long-poll request open while the app is in the foreground and
@@ -184,9 +241,10 @@ final class MessagingStore {
 
     /// Send (optionally edited), dismiss, or mark as answered in Instagram.
     @discardableResult
-    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String? = nil) async -> Bool {
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String? = nil,
+                       kind: ReviewItem.Suggestion.Kind = .text) async -> Bool {
         let ok = await perform {
-            try await backend.resolveReview(item, action: action, text: text)
+            try await backend.resolveReview(item, action: action, text: text, kind: kind)
             reviews.removeAll { $0.id == item.id }
         }
         if ok, action == .send {
@@ -194,6 +252,14 @@ final class MessagingStore {
             if isRemote { await refreshJobs() }
         }
         return ok
+    }
+
+    /// "More options" on a held reply: ECHO writes a few more in your voice.
+    func moreSuggestions(for item: ReviewItem) async {
+        await perform {
+            let fresh = try await backend.moreSuggestions(for: item)
+            if let index = reviews.firstIndex(where: { $0.id == item.id }) { reviews[index].suggestions = fresh }
+        }
     }
 
     func setTakenOver(_ takenOver: Bool, in conversationID: UUID) async {
@@ -225,6 +291,32 @@ final class MessagingStore {
     @discardableResult
     func saveStyle(_ style: FriendStyle, for friend: Friend) async -> Bool {
         await perform { _ = try await backend.saveStyle(style, for: friend) }
+    }
+
+    func learnStyleNow(for friend: Friend) async -> FriendStyle? {
+        var learned: FriendStyle?
+        await perform { learned = try await backend.learnStyleNow(for: friend) }
+        return learned
+    }
+
+    @discardableResult
+    func forgetLearnedStyle(for friend: Friend) async -> Bool {
+        await perform { try await backend.forgetLearnedStyle(for: friend) }
+    }
+
+    /// Ideas for a scheduled message, in your voice for this relationship.
+    func messageIdeas(for friend: Friend, occasion: String?) async -> [MessageIdea] {
+        var ideas: [MessageIdea] = []
+        await perform { ideas = try await backend.messageIdeas(for: friend, occasion: occasion, count: 4) }
+        return ideas
+    }
+
+    func uploadContext(_ context: UserContextUpload) async {
+        try? await backend.uploadContext(context)    // background: never shows an error banner
+    }
+
+    func clearContext() async {
+        try? await backend.clearContext()
     }
 
     func loadAutomationSettings() async -> AutomationSettings? {

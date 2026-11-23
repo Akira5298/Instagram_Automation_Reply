@@ -23,10 +23,14 @@ from app.ai.prompts import (
     CHAT_SYSTEM_PROMPT,
     COMPOSE_SYSTEM_PROMPT,
     REPLY_SYSTEM_PROMPT,
+    STYLE_SYSTEM_PROMPT,
+    SUGGEST_SYSTEM_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
     chat_output_schema,
     compose_output_schema,
     reply_output_schema,
+    style_output_schema,
+    suggest_output_schema,
 )
 from app.ai.provider import (
     AIBadOutput,
@@ -35,6 +39,9 @@ from app.ai.provider import (
     AIRefused,
     AssistantTurn,
     ComposedMessage,
+    ImageInput,
+    LearnedStyle,
+    MessageIdea,
     ReplyDraft,
     SummaryResult,
     Usage,
@@ -81,6 +88,8 @@ class AnthropicProvider:
         self._schema = chat_output_schema()
         self._compose_schema = compose_output_schema()
         self._reply_schema = reply_output_schema()
+        self._suggest_schema = suggest_output_schema()
+        self._style_schema = style_output_schema()
 
     async def chat_turn(self, context_block: str, messages: list[dict]) -> AssistantTurn:
         kwargs: dict[str, Any] = {
@@ -182,7 +191,12 @@ class AnthropicProvider:
             usage=_usage(response),
         )
 
-    async def draft_reply(self, context_block: str) -> ReplyDraft:
+    async def draft_reply(self, context_block: str, images: list[ImageInput] | None = None) -> ReplyDraft:
+        content: list[dict[str, Any]] = [
+            {"type": "image", "source": {"type": "base64", "media_type": img.media_type, "data": img.data_b64}}
+            for img in (images or [])
+        ]
+        content.append({"type": "text", "text": "Draft the reply to the [unanswered] messages now."})
         kwargs: dict[str, Any] = {
             "model": self.chat_model,
             "max_tokens": 1024,
@@ -190,7 +204,7 @@ class AnthropicProvider:
                 {"type": "text", "text": REPLY_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
                 {"type": "text", "text": context_block},
             ],
-            "messages": [{"role": "user", "content": "Draft the reply to the [unanswered] messages now."}],
+            "messages": [{"role": "user", "content": content}],
             "output_config": {
                 "effort": self.effort,
                 "format": {"type": "json_schema", "schema": self._reply_schema},
@@ -206,7 +220,7 @@ class AnthropicProvider:
         try:
             data = json.loads(_first_text(response))
             action = str(data["action"])
-            if action not in ("reply", "no_reply", "needs_user"):
+            if action not in ("reply", "react", "no_reply", "needs_user"):
                 raise ValueError(f"bad action {action!r}")
             text = str(data.get("message") or "").strip()
             if action == "reply" and not text:
@@ -222,9 +236,51 @@ class AnthropicProvider:
             language=str(data.get("language") or "en")[:16],
             flags=[str(f) for f in flags],
             note=str(data.get("note") or "")[:300],
+            alternatives=[str(a).strip() for a in (data.get("alternatives") or []) if str(a).strip()][:3],
             model=response.model,
             usage=_usage(response),
         )
+
+    async def suggest_messages(self, context_block: str, occasion: str | None, count: int) -> list[MessageIdea]:
+        ask = f"Suggest {count} messages."
+        if occasion:
+            ask += f"\n<occasion>{occasion}</occasion>"
+        data = await self._structured(SUGGEST_SYSTEM_PROMPT, context_block, ask, self._suggest_schema,
+                                      self.chat_model, 1500)
+        ideas = [MessageIdea(str(i.get("text", "")).strip(), str(i.get("vibe", "")).strip()[:30])
+                 for i in data.get("suggestions") or []]
+        return [i for i in ideas if i.text][:count]
+
+    async def learn_style(self, transcript_block: str) -> LearnedStyle:
+        data = await self._structured(STYLE_SYSTEM_PROMPT, transcript_block, "Describe my style with this friend.",
+                                      self._style_schema, self.summary_model, 1200)
+        return LearnedStyle(friend_style=data.get("friend_style") or {},
+                            profile_updates=list(data.get("profile_updates") or []))
+
+    async def _structured(self, system: str, context_block: str, ask: str, schema: dict, model: str,
+                          max_tokens: int) -> dict:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": context_block},
+            ],
+            "messages": [{"role": "user", "content": ask}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}},
+        }
+        response = await self._call(**kwargs)
+        if response.stop_reason == "refusal":
+            raise AIRefused("refused")
+        if response.stop_reason == "max_tokens":
+            raise AIBadOutput("truncated")
+        try:
+            data = json.loads(_first_text(response))
+        except (ValueError, TypeError) as exc:
+            raise AIBadOutput(f"unparseable: {exc}") from exc
+        if not isinstance(data, dict):
+            raise AIBadOutput("not an object")
+        return data
 
     async def _call(self, **kwargs: Any) -> Any:
         try:

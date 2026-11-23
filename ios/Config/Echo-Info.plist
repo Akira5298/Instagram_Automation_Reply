@@ -10,6 +10,16 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!-- Only standard HTTPS and iOS Keychain encryption: exempt from export documentation. -->
+	<!-- Set from the ECHO_PUSH_ENABLED build setting in project.yml. -->
+	<key>EchoPushEnabled</key>
+	<string>$(ECHO_PUSH_ENABLED)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Optional. ECHO shares only your city with your own server so replies know roughly where you are. Your exact location is never stored or sent to friends.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Optional. ECHO reads the next day and a half of your calendar so replies know when you're busy. Event details are never sent to friends.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>ECHO connects to your development backend on this network.</string>
 </dict>

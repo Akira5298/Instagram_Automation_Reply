@@ -6,7 +6,6 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-import psycopg
 import pytest
 from psycopg.rows import dict_row
 

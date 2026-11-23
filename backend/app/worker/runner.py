@@ -33,6 +33,7 @@ from psycopg_pool import AsyncConnectionPool
 from app.ai.compose_context import build_compose_context
 from app.ai.provider import AIError, AIProvider
 from app.core.config import Settings
+from app.services import style_learning
 from app.db import jobs_repo, messaging_repo, profile_repo
 from app.domain.job_state import (
     MAX_ATTEMPTS,
@@ -115,6 +116,7 @@ class Worker:
         instagram: Any = None,
         worker_id: str | None = None,
         lease: timedelta = timedelta(minutes=5),
+        media: Any = None,
     ) -> None:
         self.pool = pool
         self.ai = ai
@@ -133,7 +135,7 @@ class Worker:
 
         self.auto_replies = AutoReplyProcessor(
             pool=pool, ai=ai, messaging=messaging, settings=settings, clock=self.clock,
-            worker_id=self.worker_id, lease=lease,
+            worker_id=self.worker_id, lease=lease, media=media,
         )
 
     # ------------------------------------------------------------------ loop
@@ -193,6 +195,10 @@ class Worker:
                     conn, now - timedelta(days=self.settings.message_retention_days))
         except Exception:
             log.exception("maintenance failed")
+        try:
+            await style_learning.learn_pending(self.pool, self.ai, now)
+        except Exception:
+            log.exception("style learning failed")
 
     async def _poll_instagram(self, now: datetime) -> None:
         """Safety net for missed webhooks (Mac asleep, app not Live yet, Meta
@@ -324,7 +330,7 @@ class Worker:
                 """
                 select r.id as run_id, r.status, r.attempt, r.scheduled_for, r.idempotency_key, r.generated_text,
                        r.safety_flags, r.approved_by_user, r.claimed_by,
-                       j.id as job_id, j.user_id, j.instruction, j.status as job_status, j.automation_enabled,
+                       j.id as job_id, j.user_id, j.instruction, j.message_text, j.status as job_status, j.automation_enabled,
                        f.id as friend_id, f.igsid, f.display_name, f.relationship_preset as style, f.language,
                        f.ai_reply_enabled, f.consent_status, f.last_inbound_message_at, f.manual_override_until,
                        f.disclosure_sent_at,
@@ -346,7 +352,6 @@ class Worker:
         if b is None or b["status"] != "running" or b["claimed_by"] != self.worker_id:
             return
         now = self.clock()
-        name = b["display_name"]
 
         # 1. Job paused/cancelled after this run was queued.
         if b["job_status"] in ("paused", "cancelled"):
@@ -367,7 +372,17 @@ class Worker:
         # 4. Draft (reused on retries so the text never changes between attempts).
         text: str | None = b["generated_text"]
         flags = set(b["safety_flags"] or [])
-        if text is None:
+        if text is None and b["message_text"]:
+            # You wrote (or picked) this exact message: sent verbatim, no AI draft and no
+            # safety hold. Meta's eligibility rules below still apply.
+            text = b["message_text"]
+            flags = set()
+            b = {**b, "approved_by_user": True}
+            async with self.pool.connection() as conn:
+                await jobs_repo.update_run(conn, b["run_id"], {
+                    "generated_text": text, "safety_flags": [], "approved_by_user": True,
+                }, owner=self.worker_id)
+        elif text is None:
             try:
                 composed = await self._compose(b, now)
             except AIError as exc:

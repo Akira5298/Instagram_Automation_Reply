@@ -47,6 +47,10 @@ class MessagingProvider(Protocol):
         self, *, account_ig_id: str, recipient_igsid: str, text: str, idempotency_key: str
     ) -> SendResult: ...
 
+    async def send_reaction(
+        self, *, account_ig_id: str, recipient_igsid: str, message_id: str, idempotency_key: str
+    ) -> None: ...
+
 
 FailureMode = Literal["none", "transient_once", "transient_always", "permanent", "unknown"]
 
@@ -67,6 +71,7 @@ class MockMessagingProvider:
     name: str = "mock"
     failure_mode: FailureMode = "none"
     sent: list[SentRecord] = field(default_factory=list)
+    reactions: list[tuple[str, str]] = field(default_factory=list)
     _by_key: dict[str, str] = field(default_factory=dict)
     _transient_used: bool = False
 
@@ -89,6 +94,14 @@ class MockMessagingProvider:
         self._by_key[idempotency_key] = message_id
         self.sent.append(SentRecord(recipient_igsid, text, idempotency_key, message_id))
         return SendResult(message_id)
+
+    async def send_reaction(
+        self, *, account_ig_id: str, recipient_igsid: str, message_id: str, idempotency_key: str
+    ) -> None:
+        if self.failure_mode in ("transient_always", "permanent", "unknown"):
+            await self.send_text(account_ig_id=account_ig_id, recipient_igsid=recipient_igsid,
+                                 text="", idempotency_key=idempotency_key)   # raises the simulated error
+        self.reactions.append((recipient_igsid, message_id))
 
     def set_failure_mode(self, mode: FailureMode) -> None:
         self.failure_mode = mode

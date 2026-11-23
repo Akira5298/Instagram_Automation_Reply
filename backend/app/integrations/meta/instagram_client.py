@@ -254,6 +254,15 @@ class InstagramClient:
         })
         return str(data["message_id"])
 
+    async def send_reaction(self, token: str, ig_id: str, recipient_igsid: str, message_id: str,
+                            reaction: str = "love") -> None:
+        """❤️ a message. Instagram's API only accepts the "love" reaction."""
+        await self._graph("POST", f"{ig_id}/messages", token, json={
+            "recipient": {"id": recipient_igsid},
+            "sender_action": "react",
+            "payload": {"message_id": message_id, "reaction": reaction},
+        })
+
     async def user_profile(self, token: str, igsid: str) -> dict[str, Any]:
         return await self._graph("GET", igsid, token, params={"fields": "name,username"})
 

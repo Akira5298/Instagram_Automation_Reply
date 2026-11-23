@@ -145,6 +145,8 @@ struct ScheduledJob: Identifiable, Codable, Hashable, Sendable {
     var latestRunID: UUID? = nil
     var draftText: String? = nil
     var createdVia: String? = nil
+    /// Set when you wrote or picked the exact words: sent verbatim, no AI draft.
+    var messageText: String? = nil
 
     /// Keys as produced by `convertFromSnakeCase` (e.g. "time_zone_id" → "timeZoneId").
     enum CodingKeys: String, CodingKey {
@@ -167,6 +169,7 @@ struct ScheduledJob: Identifiable, Codable, Hashable, Sendable {
         case latestRunID = "latestRunId"
         case draftText
         case createdVia
+        case messageText
     }
 
     var timeZone: TimeZone { TimeZone(identifier: timeZoneID) ?? .current }
@@ -229,4 +232,6 @@ struct NewJobDraft: Sendable {
     var recurrence: ScheduledJob.Recurrence
     var instruction: String
     var automationEnabled: Bool
+    /// Exact words to send instead of an instruction for ECHO.
+    var messageText: String? = nil
 }

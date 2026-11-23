@@ -546,3 +546,148 @@ final class AutoReplyTests: XCTestCase {
         XCTAssertEqual(store.conversation(id: conversation.id)?.messages.last?.text, "sorry, can't this week")
     }
 }
+
+// MARK: - Phase 6
+
+final class Phase6Tests: XCTestCase {
+    /// Settings saved by older versions must still load — otherwise an update
+    /// would silently reset the backend URL and switch ECHO back to mock mode.
+    func testOldSettingsFileStillDecodes() throws {
+        let old = """
+        {"automationPaused": false, "backendBaseURL": "https://me.ngrok-free.dev", "useMockServices": false,
+         "defaultTimeZoneID": "Asia/Kuala_Lumpur", "messageRetentionDays": 30,
+         "notifications": {"messageSent": false, "jobBlocked": true, "deliveryFailed": true,
+                           "needsAttention": true, "automationChanged": true, "connectionError": true,
+                           "scheduleReminder": false}}
+        """.data(using: .utf8)!
+        let settings = try JSONDecoder().decode(AppSettings.self, from: old)
+        XCTAssertEqual(settings.backendBaseURL, "https://me.ngrok-free.dev")
+        XCTAssertFalse(settings.notifications.messageSent)
+        XCTAssertFalse(settings.notifications.quietHoursEnabled)
+        XCTAssertEqual(settings.notifications.quietStartMinutes, 23 * 60)
+    }
+
+    func testQuietHoursWireFormat() {
+        var prefs = NotificationPreferences()
+        prefs.quietHoursEnabled = true
+        prefs.quietStartMinutes = 22 * 60 + 30
+        prefs.quietEndMinutes = 6 * 60
+        let wire = ServerNotificationPreferences(prefs)
+        XCTAssertEqual(wire.quietHoursStart, "22:30:00")
+        XCTAssertEqual(wire.quietHoursEnd, "06:00:00")
+        XCTAssertEqual(wire.local, prefs)
+        prefs.quietHoursEnabled = false
+        XCTAssertNil(ServerNotificationPreferences(prefs).quietHoursStart)
+    }
+
+    @MainActor
+    func testNotificationTapRoutes() {
+        let push = PushManager.shared
+        let id = UUID()
+        push.handleTap(friendID: id.uuidString, category: "message_sent")
+        XCTAssertEqual(push.route, .conversation(id))
+        push.handleTap(friendID: id.uuidString, category: "needs_attention")
+        XCTAssertEqual(push.route, .reviews)
+        push.route = nil
+    }
+}
+
+// MARK: - Smarter replies
+
+@MainActor
+final class SmarterRepliesTests: XCTestCase {
+    func testReviewWithSuggestionsDecodesAndOlderServersStillWork() throws {
+        let json = """
+        {"id": "6f1c2a52-6f7a-4a8e-9a43-1b9b3f0d2a10", "origin": "auto_reply",
+         "friend_id": "0b8a7f0e-6c8a-4f3c-9b1e-2a6a1d5c3e44", "friend_name": "Mika", "reason": "review_mode",
+         "reason_text": "is waiting for your OK", "draft": "haha yes", "inbound_text": "[Reel: “cat”]",
+         "created_at": "2026-11-16T09:00:00Z", "window_expires_at": "2026-11-17T09:00:00Z",
+         "suggestions": [{"text": "haha yes", "kind": "text"}, {"text": "❤️", "kind": "reaction"}]}
+        """
+        let item: ReviewItem = try JSONDecoderBox.decode(Data(json.utf8))
+        XCTAssertEqual(item.options.map(\.kind), [.text, .reaction])
+        XCTAssertEqual(item.systemImage, "checkmark.bubble")
+
+        let old = json.replacingOccurrences(of: #", "suggestions": [{"text": "haha yes", "kind": "text"}, {"text": "❤️", "kind": "reaction"}]"#, with: "")
+        let oldItem: ReviewItem = try JSONDecoderBox.decode(Data(old.utf8))
+        XCTAssertTrue(oldItem.options.isEmpty)
+    }
+
+    func testAutomationSettingsToleratesOlderServers() throws {
+        let json = """
+        {"paused": false, "takeover_minutes": 30, "daily_reply_limit": 50, "consent_request_text": "Is it ok?",
+         "ai_disclosure_text": "AI may help me reply."}
+        """
+        let settings: AutomationSettings = try JSONDecoderBox.decode(Data(json.utf8))
+        XCTAssertNil(settings.replyLength)
+        let newer: AutomationSettings = try JSONDecoderBox.decode(Data(json.replacingOccurrences(
+            of: "}", with: #", "auto_reply_mode": "review", "reply_length": "short", "learn_from_chats": true}"#).utf8))
+        XCTAssertEqual(newer.autoReplyMode, .review)
+        XCTAssertEqual(newer.replyLength, .short)
+    }
+
+    func testLearnedStyleDecodes() throws {
+        let json = """
+        {"tone": null, "formality": 2, "emoji_level": 2, "max_sentences": null, "slang_allowed": true,
+         "custom_instructions": null, "avoid_topics": [], "learned_message_count": 12,
+         "learned_at": "2026-11-16T09:00:00Z",
+         "learned": {"tone": "playful", "favourite_emoji": ["😭"], "phrases": ["bro"], "typical_length": "short"}}
+        """
+        let style: FriendStyle = try JSONDecoderBox.decode(Data(json.utf8))
+        XCTAssertEqual(style.learned?.phrases, ["bro"])
+        XCTAssertEqual(style.learnedMessageCount, 12)
+    }
+
+    func testCalendarSummaryKeepsOnlyBusyBlocksAndOptionalTitles() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let raw = [
+            ContextManager.RawEvent(start: now.addingTimeInterval(7200), end: now.addingTimeInterval(9000),
+                                    allDay: false, free: false, cancelled: false, title: "Dentist"),
+            ContextManager.RawEvent(start: now.addingTimeInterval(3600), end: now.addingTimeInterval(5400),
+                                    allDay: false, free: true, cancelled: false, title: "Lunch?"),
+            ContextManager.RawEvent(start: now, end: now.addingTimeInterval(600),
+                                    allDay: false, free: false, cancelled: true, title: "Cancelled"),
+        ]
+        let private_ = ContextManager.summarise(raw, includeTitles: false)
+        XCTAssertEqual(private_.count, 2)
+        XCTAssertEqual(private_.map(\.busy), [false, true])            // sorted by start
+        XCTAssertTrue(private_.allSatisfy { $0.title == nil })
+        XCTAssertEqual(ContextManager.summarise(raw, includeTitles: true).last?.title, "Dentist")
+    }
+
+    func testContextUploadUsesServerKeys() throws {
+        var upload = UserContextUpload()
+        upload.location = .init(locality: "Petaling Jaya", region: "Selangor", country: "Malaysia")
+        upload.clearCalendar = true
+        let json = String(decoding: try APIClient.encoder.encode(upload), as: UTF8.self)
+        XCTAssertTrue(json.contains("\"clear_calendar\":true"))
+        XCTAssertTrue(json.contains("\"locality\":\"Petaling Jaya\""))
+    }
+
+    func testOfflineTapToSendAndReaction() async throws {
+        let store = MessagingStore.mock()
+        guard let conversation = store.conversations.first else { return XCTFail("no sample data") }
+        store.updateFriend(in: conversation.id) {
+            $0.aiReplyEnabled = true
+            $0.consent = .granted
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        await store.simulateInbound("can you lend me RM50", in: conversation.id)
+        var review = try XCTUnwrap(store.reviews.first)
+        XCTAssertEqual(review.options.count, 3)
+
+        await store.moreSuggestions(for: review)
+        review = try XCTUnwrap(store.reviews.first)
+        XCTAssertTrue(review.options.contains(.init(text: "❤️", kind: .reaction)))
+
+        await store.resolveReview(review, action: .send, kind: .reaction)
+        XCTAssertEqual(store.conversation(id: conversation.id)?.messages.last?.text, "❤️ reacted")
+    }
+
+    func testPartnerAndFamilyPresetsRoundTrip() throws {
+        for preset in [Friend.StylePreset.partner, .family] {
+            let data = try JSONEncoder().encode(preset)
+            XCTAssertEqual(try JSONDecoder().decode(Friend.StylePreset.self, from: data), preset)
+        }
+    }
+}

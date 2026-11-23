@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 
 FRIEND_COLUMNS = """
     f.id, f.igsid, f.display_name, coalesce(f.username, '') as username,
@@ -135,15 +136,17 @@ async def record_consent(
 
 
 async def record_inbound(
-    conn: AsyncConnection, *, user_id: UUID, friend_id: UUID, text: str, mid: str, at: datetime
+    conn: AsyncConnection, *, user_id: UUID, friend_id: UUID, text: str, mid: str, at: datetime,
+    attachments: list[dict] | None = None,
 ) -> None:
     await conn.execute(
         """
-        insert into ig_messages (user_id, friend_id, direction, ig_message_id, content, sent_by, platform_time)
-        values (%s, %s, 'inbound', %s, %s, 'friend', %s)
+        insert into ig_messages (user_id, friend_id, direction, ig_message_id, content, attachments, sent_by,
+                                 platform_time)
+        values (%s, %s, 'inbound', %s, %s, %s, 'friend', %s)
         on conflict (ig_message_id) do nothing
         """,
-        (user_id, friend_id, mid, text, at),
+        (user_id, friend_id, mid, text, Jsonb(attachments or []), at),
     )
     await conn.execute(
         """
@@ -172,7 +175,7 @@ async def record_outbound(
 async def recent_thread(conn: AsyncConnection, friend_id: UUID, limit: int = 12) -> list[dict[str, Any]]:
     cur = await conn.execute(
         """
-        select id, direction, sent_by, content, platform_time from ig_messages
+        select id, ig_message_id, direction, sent_by, content, attachments, platform_time from ig_messages
         where friend_id = %s and content is not null
         order by platform_time desc limit %s
         """,
@@ -212,6 +215,7 @@ async def message_exists(conn: AsyncConnection, mid: str) -> bool:
 async def purge_old_content(conn: AsyncConnection, older_than) -> int:
     """Minimise retention: drop message text past the retention period."""
     cur = await conn.execute(
-        "update ig_messages set content = null where content is not null and platform_time < %s", (older_than,)
+        "update ig_messages set content = null, attachments = '[]'::jsonb "
+        "where content is not null and platform_time < %s", (older_than,)
     )
     return cur.rowcount

@@ -12,6 +12,26 @@ struct AutoReplySettingsSection: View {
     var body: some View {
         Section {
             if let binding = Binding($settings) {
+                Picker("Reply mode", selection: Binding(
+                    get: { binding.wrappedValue.autoReplyMode ?? .auto },
+                    set: { binding.wrappedValue.autoReplyMode = $0 })) {
+                    ForEach(AutomationSettings.ReplyMode.allCases) { Text($0.title).tag($0) }
+                }
+                Picker("Reply length", selection: Binding(
+                    get: { binding.wrappedValue.replyLength ?? .adaptive },
+                    set: { binding.wrappedValue.replyLength = $0 })) {
+                    ForEach(AutomationSettings.ReplyLength.allCases) { length in
+                        VStack(alignment: .leading) {
+                            Text(length.title)
+                            Text(length.summary).font(EchoFont.caption).foregroundStyle(EchoColor.textSecondary)
+                        }
+                        .tag(length)
+                    }
+                }
+                .pickerStyle(.navigationLink)
+                Toggle("Learn from my chats", isOn: Binding(
+                    get: { binding.wrappedValue.learnFromChats ?? true },
+                    set: { binding.wrappedValue.learnFromChats = $0 }))
                 Picker("After I reply myself, wait", selection: binding.takeoverMinutes) {
                     ForEach(Self.takeoverOptions, id: \.self) { minutes in
                         Text(minutes == 0 ? "Don't wait" : minutes < 60 ? "\(minutes) min" : "\(minutes / 60) h").tag(minutes)
@@ -36,7 +56,7 @@ struct AutoReplySettingsSection: View {
         } header: {
             Text("Automatic replies")
         } footer: {
-            Text("ECHO only replies to friends who agreed and have AI replies on, inside Instagram's 24-hour window. Each friend also has their own delay, review and style settings in Messages.")
+            Text("Review every reply: ECHO drafts a few options in your voice and waits in “Needs you” — tap one to send. Learn from my chats: ECHO studies the messages you type yourself (tone, slang, emoji, how you talk to each person) to sound more like you; it never learns from its own replies. ECHO only replies to friends who agreed and have AI replies on, inside Instagram's 24-hour window.")
         }
         .tint(EchoColor.cyan)
         .listRowBackground(EchoColor.surface.opacity(0.7))

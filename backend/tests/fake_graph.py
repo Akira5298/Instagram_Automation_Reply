@@ -19,6 +19,7 @@ class FakeGraph:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict]] = []
         self.sent: list[dict] = []
+        self.reactions: list[dict] = []
         self.send_error: tuple[int, dict] | None = None
         self.refresh_count = 0
         self.permissions = "instagram_business_basic,instagram_business_manage_messages"
@@ -144,6 +145,9 @@ class FakeGraph:
             if self.send_error:
                 status, err = self.send_error
                 return httpx.Response(status, json={"error": err})
+            if body.get("sender_action") == "react":
+                self.reactions.append({"to": body["recipient"]["id"], **body["payload"]})
+                return httpx.Response(200, json={"recipient_id": body["recipient"]["id"]})
             mid = f"aWdf{next(self._mid):06d}"
             self.sent.append({"to": body["recipient"]["id"], "text": body["message"]["text"], "mid": mid,
                               "auth": request.headers.get("authorization"), "host": "graph.facebook.com"})

@@ -8,6 +8,7 @@ struct ConversationDetailView: View {
     @State private var reply = ""
     @State private var showingSettings = false
     @State private var showingStyle = false
+    @State private var showingMemories = false
     @State private var showingReviews = false
 
     var body: some View {
@@ -44,6 +45,7 @@ struct ConversationDetailView: View {
                         }
                     },
                     onEditStyle: { showingStyle = true },
+                    onEditMemories: { showingMemories = true },
                     onOpenReviews: { showingReviews = true }
                 )
 
@@ -105,6 +107,9 @@ struct ConversationDetailView: View {
         .sheet(isPresented: $showingReviews) {
             ReviewQueueView(store: store)
         }
+        .sheet(isPresented: $showingMemories) {
+            FriendMemoriesSheet(store: store, friend: friend)
+        }
         .toolbar {
             if store.usesMockInstagram {
             ToolbarItem(placement: .primaryAction) {
@@ -140,6 +145,7 @@ struct FriendControlsCard: View {
     var onTakeOver: (Bool) -> Void = { _ in }
     var onRequestConsent: () -> Void = {}
     var onEditStyle: () -> Void = {}
+    var onEditMemories: () -> Void = {}
     var onOpenReviews: () -> Void = {}
 
     @State private var confirmingConsentRequest = false
@@ -314,6 +320,12 @@ extension FriendControlsCard {
 
         Button(action: onEditStyle) {
             Label("Reply style for \(friend.firstName)", systemImage: "slider.horizontal.3")
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .foregroundStyle(EchoColor.cyan)
+
+        Button(action: onEditMemories) {
+            Label("What ECHO remembers about \(friend.firstName)", systemImage: "brain.head.profile")
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .foregroundStyle(EchoColor.cyan)

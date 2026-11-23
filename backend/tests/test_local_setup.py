@@ -9,7 +9,7 @@ import pytest
 
 from app.core.public_url import meta_dashboard_urls, oauth_redirect_uri, public_base_url
 from app.migrate import migrate, migration_files, pending, status
-from tests.conftest import make_settings, requires_db
+from tests.conftest import make_settings
 
 MIG_DB = os.environ.get("ECHO_TEST_MIGRATIONS_DATABASE_URL")
 

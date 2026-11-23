@@ -66,4 +66,6 @@ REASON_TEXT = {
     "needs_you": "needs an answer only you can give",
     "attachment": "includes a photo, video or voice message ECHO can't see",
     "review_first": "is set to check every reply with you first",
+    "review_mode": "is waiting for your OK (reply mode: review everything)",
+    "personal_info": "mentions where you are or something in your calendar",
 }

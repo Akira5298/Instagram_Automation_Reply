@@ -206,7 +206,7 @@ struct JobCard: View {
                 .font(EchoFont.headline)
                 .foregroundStyle(EchoColor.textPrimary)
 
-            Text(job.instruction)
+            Text(job.messageText.map { "“\($0)”" } ?? job.instruction)
                 .font(EchoFont.callout)
                 .foregroundStyle(EchoColor.textSecondary)
 

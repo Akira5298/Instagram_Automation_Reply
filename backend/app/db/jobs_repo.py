@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 JOB_COLUMNS = """
-    j.id, j.user_id, j.friend_id, j.recipient_igsid, j.recipient_display_name, j.instruction,
+    j.id, j.user_id, j.friend_id, j.recipient_igsid, j.recipient_display_name, j.instruction, j.message_text,
     j.style_preset, j.language, j.first_run_at, j.timezone, j.local_time, j.rrule, j.next_run_at,
     j.automation_enabled, j.status, j.created_via, j.created_at, j.last_run_at, j.last_run_status,
     j.run_count, f.relationship_preset as friend_style, f.consent_status as friend_consent
@@ -38,18 +38,18 @@ RUN_COLUMNS_R = ", ".join(f"r.{name}" for name in RUN_FIELDS)
 async def create_job(
     conn: AsyncConnection, *, user_id: UUID, friend: dict, instruction: str, style_preset: str | None,
     first_run_at: datetime, timezone: str, local_time: time, rrule: str | None, next_run_at: datetime,
-    automation_enabled: bool, created_via: str,
+    automation_enabled: bool, created_via: str, message_text: str | None = None,
 ) -> UUID:
     cur = await conn.execute(
         """
         insert into scheduled_jobs (user_id, friend_id, recipient_igsid, recipient_display_name, instruction,
             style_preset, first_run_at, timezone, local_time, rrule, next_run_at, automation_enabled,
-            status, created_via)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+            status, created_via, message_text)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s)
         returning id
         """,
         (user_id, friend["id"], friend["igsid"], friend["display_name"], instruction, style_preset,
-         first_run_at, timezone, local_time, rrule, next_run_at, automation_enabled, created_via),
+         first_run_at, timezone, local_time, rrule, next_run_at, automation_enabled, created_via, message_text),
     )
     row = await cur.fetchone()
     assert row is not None

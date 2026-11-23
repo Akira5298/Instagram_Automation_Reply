@@ -39,7 +39,52 @@ struct RootTabView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await app.messagingStore.refresh() } }   // catch up after background
         }
+        // "Your day" context (only if you turned it on): on open, then every 15 minutes.
+        .task(id: LiveKey(active: scenePhase == .active, store: ObjectIdentifier(app.messagingStore))) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                let context = ContextManager.shared
+                if context.settings.shareLocation || context.settings.shareCalendar {
+                    await context.sync(to: app.messagingStore)
+                }
+                try? await Task.sleep(for: .seconds(ContextManager.uploadInterval))
+            }
+        }
+        // Push (Phase 6): register the device with your server, open tapped notifications.
+        .task { await PushManager.shared.refreshStatus() }
+        .task(id: PushTokenKey(token: PushManager.shared.deviceToken, store: ObjectIdentifier(app.messagingStore))) {
+            if let token = PushManager.shared.deviceToken {
+                await app.messagingStore.registerDevice(token: token)
+            }
+        }
+        .onChange(of: PushManager.shared.route) { _, route in
+            guard let route else { return }
+            openRoute(route)
+            PushManager.shared.route = nil
+        }
     }
+}
+
+extension RootTabView {
+    private func openRoute(_ route: PushRoute) {
+        switch route {
+        case .conversation(let id):
+            app.selectedTab = .messages
+            app.messagesViewModel.path = [id]
+        case .reviews:
+            app.selectedTab = .messages
+            app.messagesViewModel.path = []
+            app.messagesViewModel.showingReviews = true
+        case .activity:
+            app.selectedTab = .scheduler
+        }
+        Task { await app.messagingStore.refresh() }
+    }
+}
+
+private struct PushTokenKey: Hashable {
+    let token: String?
+    let store: ObjectIdentifier
 }
 
 private struct LiveKey: Hashable {

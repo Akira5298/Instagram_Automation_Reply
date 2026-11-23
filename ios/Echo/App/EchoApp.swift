@@ -3,6 +3,7 @@ import UIKit
 
 @main
 struct EchoApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var app = AppModel()
 
     init() {

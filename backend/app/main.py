@@ -12,17 +12,22 @@ from app.ai.mock_provider import MockAIProvider
 from app.ai.provider import AIError, AIProvider, AIRateLimited
 from app.api import (
     chat,
+    context,
     dev,
+    devices,
     friends,
     health,
     instagram,
     jobs,
+    memories,
     profile,
     reviews,
     updates,
     webhooks,
 )
 from app.core.config import Settings, get_settings
+from app.core.hardening import install as install_hardening
+from app.services.push import build_sender
 from app.core.logging import configure_logging
 from app.db.pool import create_pool, ensure_owner
 from app.messaging.provider import MessagingProvider, MockMessagingProvider
@@ -64,12 +69,16 @@ def build_messaging(settings: Settings, pool=None, instagram=None) -> MessagingP
     return MockMessagingProvider()
 
 
+from app.services.media import ImageFetcher  # noqa: E402
+
+
 def create_app(
     settings: Settings | None = None,
     provider: AIProvider | None = None,
     messaging: MessagingProvider | None = None,
     run_worker: bool | None = None,
     instagram_service=None,
+    media=None,
 ) -> FastAPI:
     configure_logging()
     settings = settings or get_settings()
@@ -80,6 +89,7 @@ def create_app(
         app.state.ai_provider = provider or build_provider(settings)
         app.state.instagram = instagram_service if instagram_service is not None else build_instagram(settings)
         app.state.messaging = messaging
+        app.state.media = media if media is not None else ImageFetcher()
         app.state.pool = None
         app.state.worker = None
         stop = asyncio.Event()
@@ -97,7 +107,8 @@ def create_app(
             app.state.worker = Worker(
                 pool=pool, ai=app.state.ai_provider, messaging=app.state.messaging, settings=settings,
                 webhooks=WebhookProcessor(pool=pool, instagram=app.state.instagram),
-                instagram=app.state.instagram,
+                notifier=build_sender(settings, pool),
+                instagram=app.state.instagram, media=app.state.media,
             )
             if start_worker:
                 worker_task = asyncio.create_task(app.state.worker.run_forever(stop))
@@ -115,7 +126,7 @@ def create_app(
             if app.state.instagram is not None:
                 await app.state.instagram.client.aclose()
 
-    app = FastAPI(title="ECHO backend", version="0.5.1", lifespan=lifespan)
+    app = FastAPI(title="ECHO backend", version="0.7.0", lifespan=lifespan)
     app.dependency_overrides[get_settings] = lambda: settings
 
     @app.middleware("http")
@@ -123,6 +134,9 @@ def create_app(
         if request.url.path.startswith("/v1/") and getattr(request.app.state, "pool", None) is None:
             return JSONResponse({"detail": "database not configured"}, status_code=503)
         return await call_next(request)
+
+    # Added last = runs first: hardening sees every request before anything else.
+    install_hardening(app, settings)
 
     @app.exception_handler(AIError)
     async def ai_error_handler(_: Request, exc: AIError) -> JSONResponse:
@@ -137,6 +151,9 @@ def create_app(
     app.include_router(friends.router)
     app.include_router(reviews.router)
     app.include_router(updates.router)
+    app.include_router(devices.router)
+    app.include_router(memories.router)
+    app.include_router(context.router)
     app.include_router(dev.router)
     app.include_router(instagram.router)
     app.include_router(instagram.public_router)

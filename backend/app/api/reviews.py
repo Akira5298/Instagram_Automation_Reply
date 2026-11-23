@@ -21,6 +21,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from app.core.security import require_user
@@ -37,7 +38,9 @@ from app.messaging.provider import (
     TransientSendError,
     UnknownOutcome,
 )
-from app.services.delivery import Recipient, deliver
+from app.ai.provider import AIError, ImageInput
+from app.db import messaging_repo
+from app.services.delivery import REACTION_LABEL, Recipient, deliver, deliver_reaction
 
 router = APIRouter(prefix="/v1/reviews", tags=["reviews"])
 
@@ -45,12 +48,13 @@ router = APIRouter(prefix="/v1/reviews", tags=["reviews"])
 class ReviewAction(BaseModel):
     action: Literal["send", "dismiss", "sent_manually"]
     text: str | None = Field(default=None, min_length=1, max_length=1000)
+    kind: Literal["text", "reaction"] = "text"   # "reaction" = ❤️ the friend's message instead of writing
 
 
 _SELECT = """
     select r.id, r.origin, r.reason_code, r.draft_text, r.status, r.created_at, r.inbound_message_id,
-           r.auto_reply_id, r.job_run_id, r.friend_id,
-           f.display_name, f.igsid, f.last_inbound_message_at, f.consent_status, f.disclosure_sent_at,
+           r.auto_reply_id, r.job_run_id, r.friend_id, r.suggestions, r.user_id,
+           f.display_name, f.igsid, f.relationship_preset as style, f.language, u.default_timezone, u.reply_length, f.last_inbound_message_at, f.consent_status, f.disclosure_sent_at,
            a.ig_user_id, a.status as account_status, u.ai_disclosure_text,
            (select content from ig_messages m where m.ig_message_id = r.inbound_message_id) as inbound_text
     from review_items r
@@ -70,6 +74,7 @@ def _out(row: dict) -> dict:
         "reason": row["reason_code"],
         "reason_text": REASON_TEXT.get(row["reason_code"], row["reason_code"]),
         "draft": row["draft_text"],
+        "suggestions": row["suggestions"] or [],
         "inbound_text": row["inbound_text"],
         "created_at": row["created_at"],
         "window_expires_at": window,
@@ -127,7 +132,12 @@ async def resolve(review_id: UUID, body: ReviewAction, request: Request, user_id
         await profile_repo.audit(conn, user_id, "user", f"review.{body.action}", "review_item", str(review_id))
         return {"id": review_id, "status": status}
 
-    text = (body.text or row["draft_text"] or "").strip()
+    reaction = body.kind == "reaction"
+    if reaction and row["origin"] != "auto_reply":
+        raise HTTPException(status_code=422, detail="Reactions only work as a reply to a message.")
+    text = REACTION_LABEL if reaction else (body.text or row["draft_text"] or "").strip()
+    if text == REACTION_LABEL and row["origin"] == "auto_reply" and body.text is None:
+        reaction = True                       # the held draft itself was a ❤️
     if not text:
         raise HTTPException(status_code=422, detail="Write the reply first.")
     if not fits_instagram(text):
@@ -166,11 +176,16 @@ async def resolve(review_id: UUID, body: ReviewAction, request: Request, user_id
                    ig_user_id=row["ig_user_id"], igsid=row["igsid"],
                    disclosure_sent_at=row["disclosure_sent_at"], disclosure_text=row["ai_disclosure_text"])
     try:
-        delivered = await deliver(
-            request.app.state.pool, request.app.state.messaging, to, text,
-            idempotency_key=f"auto:{row['inbound_message_id']}", sent_by="echo_auto",
-            clock=lambda: datetime.now(UTC), reply_to_inbound_id=row["inbound_message_id"],
-        )
+        if reaction:
+            delivered = await deliver_reaction(
+                request.app.state.pool, request.app.state.messaging, to, row["inbound_message_id"],
+                idempotency_key=f"auto:{row['inbound_message_id']}", clock=lambda: datetime.now(UTC))
+        else:
+            delivered = await deliver(
+                request.app.state.pool, request.app.state.messaging, to, text,
+                idempotency_key=f"auto:{row['inbound_message_id']}", sent_by="echo_auto",
+                clock=lambda: datetime.now(UTC), reply_to_inbound_id=row["inbound_message_id"],
+            )
     except TransientSendError as exc:
         raise HTTPException(status_code=503, detail=f"Instagram is busy; try again. ({exc})") from exc
     except PermanentSendError as exc:
@@ -183,16 +198,54 @@ async def resolve(review_id: UUID, body: ReviewAction, request: Request, user_id
     await conn.execute(
         """
         update auto_replies set status = 'sent', approved_by_user = true, generated_text = %s,
-            outbound_message_id = %s, executed_at = now()
+            outbound_message_id = %s, executed_at = now(), reply_kind = %s
         where id = %s
         """,
-        (text, delivered.outbound_id, row["auto_reply_id"]),
+        (text, delivered.outbound_id, "reaction" if reaction else "text", row["auto_reply_id"]),
     )
     await profile_repo.audit(conn, user_id, "user", "review.send", "review_item", str(review_id),
-                             {"edited": body.text is not None, "message_id": delivered.message_id})
+                             {"edited": body.text is not None, "kind": body.kind,
+                              "message_id": delivered.message_id})
     return {"id": review_id, "status": "approved", "message_id": delivered.message_id}
 
 
 async def _close(conn: AsyncConnection, review_id: UUID, status: str) -> None:
     await conn.execute("update review_items set status = %s, resolved_at = now() where id = %s",
                        (status, review_id))
+
+
+@router.post("/{review_id}/suggestions")
+async def more_suggestions(review_id: UUID, request: Request, user_id: UUID = Depends(require_user),
+                           conn: AsyncConnection = Depends(get_conn)):
+    """Fresh tap-to-send options for an open auto-reply review ("More options")."""
+    from app.worker.auto_reply import _image_urls, _suggestions, friend_context
+
+    cur = await conn.execute(_SELECT + " where r.user_id = %s and r.id = %s", (user_id, review_id))
+    row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="review not found")
+    if row["status"] != "open" or row["origin"] != "auto_reply":
+        raise HTTPException(status_code=409, detail="Suggestions are only for open replies.")
+    await conn.commit()       # no locks held while Claude thinks
+
+    now = datetime.now(UTC)
+    pool = request.app.state.pool
+    async with pool.connection() as c2:
+        thread = await messaging_repo.recent_thread(c2, row["friend_id"], 12)
+    block, _ = await friend_context(pool, {**row, "user_id": user_id}, thread, now)
+    fetcher = getattr(request.app.state, "media", None)
+    images = await fetcher.fetch(_image_urls(thread)) if fetcher else []
+    try:
+        draft = await request.app.state.ai_provider.draft_reply(
+            block, [ImageInput(i.media_type, i.data_b64) for i in images])
+    except AIError as exc:
+        raise HTTPException(status_code=503, detail="Couldn't get new suggestions right now.") from exc
+    kind = "reaction" if draft.action == "react" else "text"
+    fresh = _suggestions(kind, draft.text.strip(), draft.alternatives)
+    if draft.action != "react":
+        fresh.append({"text": REACTION_LABEL, "kind": "reaction"})
+    seen: set[tuple[str, str]] = set()
+    merged = [x for x in fresh + list(row["suggestions"] or [])
+              if (x["kind"], x["text"]) not in seen and not seen.add((x["kind"], x["text"]))][:6]
+    await conn.execute("update review_items set suggestions = %s where id = %s", (Jsonb(merged), review_id))
+    return {"id": review_id, "suggestions": merged}

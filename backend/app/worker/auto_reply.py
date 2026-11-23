@@ -6,7 +6,8 @@ the Claude call, so no tokens are spent on replies that can't be sent.
 
   1. Stale?           a newer message arrived → superseded (the newer one is queued)
                       someone already replied after it → skipped
-  2. Allowed at all?  global pause, AI off, no consent, you took over → skipped
+  2. Allowed at all?  global pause, AI off, no consent, you took over,
+                      quiet hours (if "hold replies" is on) → skipped
                       older than 2 hours (server was offline) → blocked + notify
   3. Daily limits     per friend and per account → blocked + notify
   4. Draft            Claude decides reply / no_reply / needs_user
@@ -24,6 +25,7 @@ re-running every gate. An unknown delivery outcome is never retried.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -35,7 +37,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from app.ai.compose_context import build_compose_context
-from app.ai.provider import AIError, AIProvider
+from app.ai.provider import AIError, AIProvider, ImageInput
 from app.core.config import Settings
 from app.db import messaging_repo, profile_repo
 from app.domain.job_state import MAX_ATTEMPTS, retry_delay_seconds
@@ -56,8 +58,10 @@ from app.messaging.provider import (
     TransientSendError,
     UnknownOutcome,
 )
-from app.services.delivery import Recipient, deliver
-from app.services.notifications import notify
+from app.api.context import load_fresh_context
+from app.services.delivery import Recipient, deliver, deliver_reaction
+from app.services.media import ImageFetcher, image_urls
+from app.services.notifications import in_quiet_hours, notify
 
 log = logging.getLogger("echo.auto_reply")
 
@@ -73,6 +77,7 @@ SKIP_TEXT = {
     "no_consent": "they haven't agreed to AI-assisted replies",
     "you_took_over": "you've taken over this conversation",
     "no_reply_needed": "nothing needed an answer",
+    "quiet_hours": "it's your quiet hours",
 }
 
 BLOCK_TEXT = {
@@ -99,8 +104,9 @@ class ReplyStats:
 class AutoReplyProcessor:
     def __init__(self, *, pool: AsyncConnectionPool, ai: AIProvider, messaging: MessagingProvider,
                  settings: Settings, clock: Callable[[], datetime], worker_id: str,
-                 lease: timedelta = timedelta(minutes=5)) -> None:
+                 lease: timedelta = timedelta(minutes=5), media: ImageFetcher | None = None) -> None:
         self.pool = pool
+        self.media = media or ImageFetcher()
         self.ai = ai
         self.messaging = messaging
         self.settings = settings
@@ -176,11 +182,15 @@ class AutoReplyProcessor:
                        f.disclosure_sent_at, f.auto_reply_require_review, f.auto_reply_daily_limit,
                        a.ig_user_id, a.status as account_status,
                        u.automation_paused, u.ai_disclosure_text, u.default_timezone,
-                       u.auto_reply_daily_limit as account_daily_limit
+                       u.auto_reply_daily_limit as account_daily_limit, u.auto_reply_mode, u.reply_length,
+                       r.reply_kind,
+                       p.quiet_hours_start, p.quiet_hours_end,
+                       coalesce(p.quiet_hours_hold_replies, false) as quiet_hold
                 from auto_replies r
                 join friends f on f.id = r.friend_id
                 join instagram_accounts a on a.id = f.instagram_account_id
                 join app_users u on u.id = r.user_id
+                left join notification_preferences p on p.user_id = r.user_id
                 where r.id = %s
                 """,
                 (reply_id,),
@@ -212,6 +222,10 @@ class AutoReplyProcessor:
         if b["manual_override_until"] and b["manual_override_until"] > now:
             await self._skip(b, now, "you_took_over", stats)
             return
+        if b["quiet_hold"] and in_quiet_hours(b["quiet_hours_start"], b["quiet_hours_end"],
+                                              b["default_timezone"], now):
+            await self._skip(b, now, "quiet_hours", stats)
+            return
         if now - b["inbound_at"] > MAX_REPLY_AGE:
             await self._block(b, now, ["too_late"], None, stats)
             return
@@ -228,30 +242,44 @@ class AutoReplyProcessor:
             async with self.pool.connection() as conn:
                 thread = await messaging_repo.recent_thread(conn, b["friend_id"], 12)
             unanswered = _unanswered(thread)
+            context_block, user_ctx = await self._context(b, thread, now)
+            images = await self.media.fetch(_image_urls(thread))
             try:
-                draft = await self.ai.draft_reply(await self._context(b, thread, now))
+                draft = await self.ai.draft_reply(
+                    context_block, [ImageInput(i.media_type, i.data_b64) for i in images])
             except AIError as exc:
                 await self._retry_or_fail(b, now, f"draft_failed: {exc}", stats)
                 return
             if draft.action == "no_reply":
                 await self._skip(b, now, "no_reply_needed", stats, note=draft.note)
                 return
-            text = draft.text.strip()
-            flags = normalise_flags(draft.flags) | keyword_flags(*unanswered, text)
-            if draft.action == "needs_user":
-                flags.add("needs_you")
-            if any(_is_attachment(m) for m in unanswered):
-                flags.add(_ATTACHMENT)
-            if not text or not fits_instagram(text):
-                flags.add("too_long" if text else "needs_you")
+            if draft.action == "react":
+                kind, text = "reaction", REACTION_TEXT
+                flags = normalise_flags(draft.flags)
+            else:
+                kind, text = "text", draft.text.strip()
+                flags = normalise_flags(draft.flags) | keyword_flags(*unanswered, text)
+                if draft.action == "needs_user":
+                    flags.add("needs_you")
+                if not text or not fits_instagram(text):
+                    flags.add("too_long" if text else "needs_you")
+                if _looks_like_leak(text):
+                    flags.add("sensitive")   # a friend may have tried to make ECHO reveal its instructions
+                if _reveals_personal_info(text, user_ctx):
+                    flags.add("personal_info")
+            suggestions = _suggestions(kind, text, draft.alternatives)
             async with self.pool.connection() as conn:
                 await self._set(conn, b["id"], generated_text=text, draft_language=draft.language,
-                                safety_flags=sorted(flags), model_note=draft.note or None)
+                                safety_flags=sorted(flags), model_note=draft.note or None, reply_kind=kind)
+            b = {**b, "reply_kind": kind}
+        else:
+            suggestions = _suggestions(b["reply_kind"], text, [])
 
-        # 5. Safety gate / review-first.
-        if flags or b["auto_reply_require_review"]:
-            reason = _primary_reason(flags) if flags else "review_first"
-            await self._needs_attention(b, now, reason, text, stats)
+        # 5. Safety gate / review mode / review-first friend.
+        if flags or b["auto_reply_mode"] == "review" or b["auto_reply_require_review"]:
+            reason = (_primary_reason(flags) if flags
+                      else "review_mode" if b["auto_reply_mode"] == "review" else "review_first")
+            await self._needs_attention(b, now, reason, text, stats, suggestions)
             return
 
         # 6. Stale again? (Claude took a few seconds; you or they may have written since.)
@@ -280,18 +308,23 @@ class AutoReplyProcessor:
             return
 
         # 8. Send.
-        await self._send(b2, text, eligibility.snapshot(), stats)
+        await self._send({**b2, "reply_kind": b.get("reply_kind") or "text"}, text, eligibility.snapshot(), stats)
 
     async def _send(self, b: dict, text: str, snapshot: dict, stats: ReplyStats) -> None:
         async with self.pool.connection() as conn:
             if not await self._set(conn, b["id"], owner=True, status="sending", eligibility=Jsonb(snapshot)):
                 return
         try:
-            delivered = await deliver(
-                self.pool, self.messaging, _recipient(b), text,
-                idempotency_key=f"auto:{b['inbound_message_id']}", sent_by="echo_auto", clock=self.clock,
-                reply_to_inbound_id=b["inbound_message_id"],
-            )
+            if b.get("reply_kind") == "reaction":
+                delivered = await deliver_reaction(
+                    self.pool, self.messaging, _recipient(b), b["inbound_message_id"],
+                    idempotency_key=f"auto:{b['inbound_message_id']}", clock=self.clock)
+            else:
+                delivered = await deliver(
+                    self.pool, self.messaging, _recipient(b), text,
+                    idempotency_key=f"auto:{b['inbound_message_id']}", sent_by="echo_auto", clock=self.clock,
+                    reply_to_inbound_id=b["inbound_message_id"],
+                )
         except TransientSendError as exc:
             async with self.pool.connection() as conn:
                 await self._set(conn, b["id"], status="running")
@@ -310,7 +343,9 @@ class AutoReplyProcessor:
                             outbound_message_id=delivered.outbound_id)
             await profile_repo.audit(conn, b["user_id"], "worker", "auto_reply.sent", "auto_reply", str(b["id"]),
                                      {"message_id": delivered.message_id})
-            await notify(conn, b["user_id"], "message_sent", f"Replied to {b['display_name']}", text,
+            title = (f"Reacted ❤️ to {b['display_name']}" if b.get("reply_kind") == "reaction"
+                     else f"Replied to {b['display_name']}")
+            await notify(conn, b["user_id"], "message_sent", title, text,
                          {"friend_id": str(b["friend_id"]), "auto_reply_id": str(b["id"])})
         stats.sent += 1
 
@@ -350,33 +385,8 @@ class AutoReplyProcessor:
             row = await cur.fetchone()
         return row["friend_count"] >= b["auto_reply_daily_limit"] or row["total"] >= b["account_daily_limit"]
 
-    async def _context(self, b: dict, thread: list[dict], now: datetime) -> str:
-        async with self.pool.connection() as conn:
-            traits = await profile_repo.list_traits(conn, b["user_id"], limit=30)
-            examples = await profile_repo.examples_for_context(conn, b["user_id"], b["language"] or None, 4)
-            cur = await conn.execute(
-                """
-                select tone, formality, emoji_level, max_sentences, slang_allowed, custom_instructions, boundaries
-                from friend_style_profiles where friend_id = %s
-                """,
-                (b["friend_id"],),
-            )
-            style = await cur.fetchone()
-            cur = await conn.execute(
-                """
-                select content from friend_memories
-                where friend_id = %s and approved and (expires_at is null or expires_at > %s)
-                order by created_at desc limit 5
-                """,
-                (b["friend_id"], now),
-            )
-            memories = [r["content"] for r in await cur.fetchall()]
-        return build_compose_context(
-            traits=traits, examples=examples,
-            friend={"display_name": b["display_name"], "style": b["style"], "language": b["language"]},
-            thread=thread, now=now, timezone=b["default_timezone"],
-            friend_style=style, memories=memories, mark_unanswered=True,
-        )
+    async def _context(self, b: dict, thread: list[dict], now: datetime) -> tuple[str, dict | None]:
+        return await friend_context(self.pool, b, thread, now)
 
     async def _set(self, conn: AsyncConnection, reply_id: UUID, *, owner: bool = False, **changes: Any) -> bool:
         sets = ", ".join(f"{k} = %s" for k in changes)
@@ -456,19 +466,23 @@ class AutoReplyProcessor:
         )
         return await cur.fetchone() is not None
 
-    async def _needs_attention(self, b: dict, now: datetime, reason: str, draft: str, stats: ReplyStats) -> None:
+    async def _needs_attention(self, b: dict, now: datetime, reason: str, draft: str, stats: ReplyStats,
+                               suggestions: list[dict] | None = None) -> None:
         async with self.pool.connection() as conn:
             await self._set(conn, b["id"], status="needs_attention", reason=reason, executed_at=now, claimed_by=None)
             await conn.execute(
                 """
                 insert into review_items (user_id, friend_id, origin, inbound_message_id, auto_reply_id,
-                                          reason_code, draft_text)
-                values (%s, %s, 'auto_reply', %s, %s, %s, %s)
+                                          reason_code, draft_text, suggestions)
+                values (%s, %s, 'auto_reply', %s, %s, %s, %s, %s)
                 """,
-                (b["user_id"], b["friend_id"], b["inbound_message_id"], b["id"], reason, draft or None),
+                (b["user_id"], b["friend_id"], b["inbound_message_id"], b["id"], reason, draft or None,
+                 Jsonb(suggestions or [])),
             )
+            options = len(suggestions or [])
             await notify(conn, b["user_id"], "needs_attention", f"{b['display_name']} needs your reply",
-                         f"ECHO drafted a reply but held it because it {REASON_TEXT.get(reason, reason)}.",
+                         f"ECHO held its reply because it {REASON_TEXT.get(reason, reason)}."
+                         + (f" Tap to pick from {options} suggestions." if options > 1 else ""),
                          {"friend_id": str(b["friend_id"]), "auto_reply_id": str(b["id"])})
         stats.held += 1
 
@@ -484,7 +498,7 @@ class AutoReplyProcessor:
 
 # ----------------------------------------------------------------- utilities
 
-_REASON_ORDER = ("money", "commitment", "sensitive", "emotional", "needs_you", "unknown_info", _ATTACHMENT,
+_REASON_ORDER = ("money", "commitment", "sensitive", "personal_info", "emotional", "needs_you", "unknown_info",
                  "too_long")
 
 
@@ -513,6 +527,53 @@ def _unanswered(thread: list[dict]) -> list[str]:
     return [str(m["content"] or "") for i, m in enumerate(thread) if i > last_outbound and m["direction"] == "inbound"]
 
 
+REACTION_TEXT = "❤️"
+
+
+def _suggestions(kind: str, text: str, alternatives: list[str]) -> list[dict]:
+    """Tap-to-send options for "Needs you": the main draft first, then the alternatives."""
+    out: list[dict] = []
+    if kind == "reaction":
+        out.append({"text": REACTION_TEXT, "kind": "reaction"})
+    elif text:
+        out.append({"text": text, "kind": "text"})
+    for alt in alternatives:
+        alt = alt.strip()
+        if alt and fits_instagram(alt) and all(alt != o["text"] for o in out):
+            out.append({"text": alt, "kind": "text"})
+    return out[:4]
+
+
+def _image_urls(thread: list[dict]) -> list[str]:
+    """Photos / post previews among the unanswered messages."""
+    last_outbound = max((i for i, m in enumerate(thread) if m["direction"] != "inbound"), default=-1)
+    urls: list[str] = []
+    for i, m in enumerate(thread):
+        if i > last_outbound and m["direction"] == "inbound":
+            urls += image_urls(m.get("attachments") or [])
+    return urls[-2:]
+
+
+def _reveals_personal_info(text: str, ctx: dict | None) -> bool:
+    """Deterministic: a draft that names your current city or a calendar entry waits for you."""
+    if not ctx or not text:
+        return False
+    lowered = text.lower()
+    terms = [ctx.get("locality") or ""] + [str(e.get("title") or "") for e in ctx.get("events") or []]
+    return any(len(t) >= 4 and re.search(rf"\b{re.escape(t.lower())}\b", lowered) for t in terms)
+
+
+_LEAK_MARKERS = ("<profile", "<friend_memories", "<friend_style", "<writing_examples", "<recent_thread",
+                 "system prompt", "my instructions", "as an ai", "language model")
+
+
+def _looks_like_leak(text: str) -> bool:
+    """Deterministic backstop against prompt injection: a reply that quotes the
+    prompt's tags or talks about being an AI is held for you, never sent."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _LEAK_MARKERS)
+
+
 def _is_attachment(text: str) -> bool:
     t = text.strip()
     return t.startswith("[") and t.endswith("]") and len(t) < 60
@@ -524,3 +585,39 @@ def _recipient(b: dict) -> Recipient:
         ig_user_id=b["ig_user_id"], igsid=b["igsid"], disclosure_sent_at=b["disclosure_sent_at"],
         disclosure_text=b["ai_disclosure_text"],
     )
+
+
+async def friend_context(pool: AsyncConnectionPool, b: dict, thread: list[dict], now: datetime, *,
+                         mark_unanswered: bool = True) -> tuple[str, dict | None]:
+    """Everything Claude needs to write as you to this friend. `b` needs user_id, friend_id,
+    display_name, style, language, default_timezone and (optionally) reply_length."""
+    async with pool.connection() as conn:
+        user_ctx = await load_fresh_context(conn, b["user_id"], now)
+        traits = await profile_repo.list_traits(conn, b["user_id"], limit=30)
+        examples = await profile_repo.examples_for_context(conn, b["user_id"], b["language"] or None, 4)
+        cur = await conn.execute(
+            """
+            select tone, formality, emoji_level, max_sentences, slang_allowed, custom_instructions, boundaries,
+                   learned
+            from friend_style_profiles where friend_id = %s
+            """,
+            (b["friend_id"],),
+        )
+        style = await cur.fetchone()
+        cur = await conn.execute(
+            """
+            select content from friend_memories
+            where friend_id = %s and approved and (expires_at is null or expires_at > %s)
+            order by created_at desc limit 5
+            """,
+            (b["friend_id"], now),
+        )
+        memories = [r["content"] for r in await cur.fetchall()]
+    block = build_compose_context(
+        traits=traits, examples=examples,
+        friend={"display_name": b["display_name"], "style": b["style"], "language": b["language"]},
+        thread=thread, now=now, timezone=b["default_timezone"],
+        friend_style=style, memories=memories, mark_unanswered=mark_unanswered,
+        user_context=user_ctx, reply_length=b.get("reply_length") or "adaptive",
+    )
+    return block, user_ctx

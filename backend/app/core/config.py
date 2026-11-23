@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     # this often (seconds). Webhooks stay the main, instant path. 0 = off.
     instagram_poll_seconds: int = 30
 
+    # --- Push notifications (Phase 6, Apple Push Notification service) ---------
+    # Apple Developer → Certificates, IDs & Profiles → Keys → "+" with APNs.
+    apns_key_path: str | None = None           # path to AuthKey_XXXXXXXXXX.p8
+    apns_private_key: SecretStr | None = None  # or the .p8 contents (\n-escaped) instead of a path
+    apns_key_id: str | None = None             # the 10-character Key ID
+    apns_team_id: str | None = None            # your 10-character Team ID
+    apns_bundle_id: str | None = None          # the app's bundle id, e.g. com.yourname.echo
+
     default_timezone: str = "Asia/Kuala_Lumpur"
 
     @property

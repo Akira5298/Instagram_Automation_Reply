@@ -50,13 +50,32 @@ class ComposedMessage:
 class ReplyDraft:
     """A reply to a friend's DM in the user's voice."""
 
-    action: str  # "reply" | "no_reply" | "needs_user"
+    action: str  # "reply" | "react" | "no_reply" | "needs_user"
     text: str
     language: str
     flags: list[str] = field(default_factory=list)
     note: str = ""
+    alternatives: list[str] = field(default_factory=list)
     model: str = "mock"
     usage: Usage = field(default_factory=Usage)
+
+
+@dataclass(frozen=True)
+class MessageIdea:
+    text: str
+    vibe: str
+
+
+@dataclass(frozen=True)
+class LearnedStyle:
+    friend_style: dict
+    profile_updates: list[dict]
+
+
+@dataclass(frozen=True)
+class ImageInput:
+    media_type: str
+    data_b64: str
 
 
 class AIError(Exception):
@@ -92,6 +111,14 @@ class AIProvider(Protocol):
         """Draft a message to a friend in the user's voice."""
         ...
 
-    async def draft_reply(self, context_block: str) -> ReplyDraft:
+    async def draft_reply(self, context_block: str, images: list[ImageInput] | None = None) -> ReplyDraft:
         """Draft a reply to the friend's unanswered messages (or decide not to)."""
+        ...
+
+    async def suggest_messages(self, context_block: str, occasion: str | None, count: int) -> list[MessageIdea]:
+        """Ideas for a message to schedule to this friend."""
+        ...
+
+    async def learn_style(self, transcript_block: str) -> LearnedStyle:
+        """How the user writes to one friend, from their own messages."""
         ...

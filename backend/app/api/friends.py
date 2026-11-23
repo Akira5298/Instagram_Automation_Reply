@@ -17,12 +17,13 @@ from app.db import messaging_repo, profile_repo
 from app.db.pool import get_conn
 from app.domain.messaging_window import EligibilityInput, evaluate_send_eligibility
 from app.messaging.provider import SendError
-from app.services import auto_reply
+from app.ai.provider import AIError
+from app.services import auto_reply, style_learning
 from app.services.notifications import notify
 
 router = APIRouter(prefix="/v1", tags=["friends"])
 
-Style = Literal["close_friend", "classmate", "professional", "custom"]
+Style = Literal["close_friend", "partner", "family", "classmate", "professional", "custom"]
 Consent = Literal["unknown", "requested", "granted", "revoked"]
 
 
@@ -85,6 +86,9 @@ class ManualMessage(BaseModel):
 
 class AutomationState(BaseModel):
     paused: bool | None = None
+    auto_reply_mode: Literal["auto", "review"] | None = None
+    reply_length: Literal["short", "medium", "long", "adaptive"] | None = None
+    learn_from_chats: bool | None = None
     takeover_minutes: int | None = Field(default=None, ge=0, le=1440)
     daily_reply_limit: int | None = Field(default=None, ge=1, le=1000)
     consent_request_text: str | None = Field(default=None, min_length=10, max_length=500)
@@ -198,6 +202,9 @@ async def send_manual(friend_id: UUID, body: ManualMessage, request: Request,
 
 
 _SETTINGS_COLUMNS = {
+    "auto_reply_mode": "auto_reply_mode",
+    "reply_length": "reply_length",
+    "learn_from_chats": "learn_from_chats",
     "takeover_minutes": "takeover_minutes",
     "daily_reply_limit": "auto_reply_daily_limit",
     "consent_request_text": "consent_request_text",
@@ -210,7 +217,7 @@ async def get_automation(user_id: UUID = Depends(require_user), conn: AsyncConne
     cur = await conn.execute(
         """
         select automation_paused, automation_paused_at, takeover_minutes, auto_reply_daily_limit,
-               consent_request_text, ai_disclosure_text
+               consent_request_text, ai_disclosure_text, auto_reply_mode, reply_length, learn_from_chats
         from app_users where id = %s
         """,
         (user_id,),
@@ -218,7 +225,9 @@ async def get_automation(user_id: UUID = Depends(require_user), conn: AsyncConne
     row = await cur.fetchone()
     return {"paused": row["automation_paused"], "paused_at": row["automation_paused_at"],
             "takeover_minutes": row["takeover_minutes"], "daily_reply_limit": row["auto_reply_daily_limit"],
-            "consent_request_text": row["consent_request_text"], "ai_disclosure_text": row["ai_disclosure_text"]}
+            "consent_request_text": row["consent_request_text"], "ai_disclosure_text": row["ai_disclosure_text"],
+            "auto_reply_mode": row["auto_reply_mode"], "reply_length": row["reply_length"],
+            "learn_from_chats": row["learn_from_chats"]}
 
 
 @router.put("/automation")
@@ -325,18 +334,52 @@ async def get_style(friend_id: UUID, user_id: UUID = Depends(require_user), conn
         raise HTTPException(status_code=404, detail="friend not found")
     cur = await conn.execute(
         """
-        select tone, formality, emoji_level, max_sentences, slang_allowed, custom_instructions, boundaries
+        select tone, formality, emoji_level, max_sentences, slang_allowed, custom_instructions, boundaries,
+               learned, learned_at, learned_message_count
         from friend_style_profiles where friend_id = %s
         """,
         (friend_id,),
     )
     row = await cur.fetchone()
     if row is None:
-        return StyleProfile().model_dump()
+        return {**StyleProfile().model_dump(), "learned": None, "learned_at": None, "learned_message_count": 0}
     out = {k: row[k] for k in ("tone", "formality", "emoji_level", "max_sentences", "slang_allowed",
                                "custom_instructions")}
     out["avoid_topics"] = list((row["boundaries"] or {}).get("avoid_topics") or [])
+    out["learned"] = row["learned"] or None
+    out["learned_at"] = row["learned_at"]
+    out["learned_message_count"] = row["learned_message_count"] or 0
     return out
+
+
+@router.post("/friends/{friend_id}/style/learn")
+async def learn_style_now(friend_id: UUID, request: Request, user_id: UUID = Depends(require_user),
+                          conn: AsyncConnection = Depends(get_conn)):
+    """Study your recent messages to this friend right now (instead of waiting for the hourly pass)."""
+    if await messaging_repo.get_friend(conn, user_id, friend_id) is None:
+        raise HTTPException(status_code=404, detail="friend not found")
+    await conn.commit()
+    try:
+        learned = await style_learning.learn_friend(request.app.state.pool, request.app.state.ai_provider,
+                                                    user_id, friend_id, datetime.now(UTC))
+    except AIError as exc:
+        raise HTTPException(status_code=503, detail="Couldn't analyse your chats right now.") from exc
+    if learned is None:
+        raise HTTPException(status_code=422, detail=(
+            "Not enough messages you wrote yourself in this chat yet. Keep chatting and ECHO will learn."))
+    return await get_style(friend_id, user_id, conn)
+
+
+@router.delete("/friends/{friend_id}/style/learned", status_code=204)
+async def forget_learned_style(friend_id: UUID, user_id: UUID = Depends(require_user),
+                               conn: AsyncConnection = Depends(get_conn)):
+    """Forget what ECHO learned about how you write to this friend. It starts over from new messages."""
+    if await messaging_repo.get_friend(conn, user_id, friend_id) is None:
+        raise HTTPException(status_code=404, detail="friend not found")
+    await conn.execute("""update friend_style_profiles set learned = '{}'::jsonb, learned_at = null,
+                          learned_message_count = 0 where friend_id = %s""", (friend_id,))
+    await conn.execute("update friends set style_learned_through = now() where id = %s", (friend_id,))
+    await profile_repo.audit(conn, user_id, "user", "friend.style_forgotten", "friend", str(friend_id))
 
 
 @router.put("/friends/{friend_id}/style")
@@ -382,3 +425,34 @@ async def notifications(limit: int = Query(default=50, ge=1, le=200),
 async def mark_read(user_id: UUID = Depends(require_user), conn: AsyncConnection = Depends(get_conn)):
     await conn.execute("update notification_outbox set read_at = now() where user_id = %s and read_at is null",
                        (user_id,))
+
+
+class SuggestRequest(BaseModel):
+    occasion: str | None = Field(default=None, max_length=120)
+    count: int = Field(default=4, ge=1, le=6)
+
+
+@router.post("/friends/{friend_id}/message-suggestions")
+async def message_suggestions(friend_id: UUID, body: SuggestRequest, request: Request,
+                              user_id: UUID = Depends(require_user), conn: AsyncConnection = Depends(get_conn)):
+    """Ideas for a message to schedule to this friend, in your voice and fitting the relationship."""
+    from app.worker.auto_reply import friend_context
+
+    friend = await messaging_repo.get_friend(conn, user_id, friend_id)
+    if friend is None:
+        raise HTTPException(status_code=404, detail="friend not found")
+    cur = await conn.execute("select default_timezone from app_users where id = %s", (user_id,))
+    tz = (await cur.fetchone())["default_timezone"]
+    thread = await messaging_repo.recent_thread(conn, friend_id, 12)
+    await conn.commit()
+    b = {"user_id": user_id, "friend_id": friend_id, "display_name": friend["display_name"],
+         "style": friend["style"], "language": friend["language"] or None, "default_timezone": tz,
+         "reply_length": "adaptive"}
+    block, _ = await friend_context(request.app.state.pool, b, thread, datetime.now(UTC), mark_unanswered=False)
+    occasion = " ".join((body.occasion or "").split()) or None
+    try:
+        ideas = await request.app.state.ai_provider.suggest_messages(block, occasion, body.count)
+    except AIError as exc:
+        raise HTTPException(status_code=503, detail="Couldn't come up with ideas right now.") from exc
+    from app.domain.safety import fits_instagram
+    return {"suggestions": [{"text": i.text, "vibe": i.vibe} for i in ideas if fits_instagram(i.text)]}

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import Settings, get_settings
 from app.core.security import require_user
+from app.domain.safety import fits_instagram
 from app.db import jobs_repo, profile_repo
 from app.db.pool import get_conn
 from app.domain.job_state import RunStatus, can_transition
@@ -42,18 +43,20 @@ class JobCreate(BaseModel):
     timezone: str | None = None
     recurrence: Recurrence = "once"
     rrule: str | None = None
-    instruction: str = Field(min_length=1, max_length=500)
-    style_preset: Literal["close_friend", "classmate", "professional", "custom"] | None = None
+    instruction: str = Field(default="", max_length=500)
+    message_text: str | None = Field(default=None, min_length=1, max_length=1000)
+    style_preset: Literal["close_friend", "partner", "family", "classmate", "professional", "custom"] | None = None
     automation_enabled: bool = True
 
 
 class JobPatch(BaseModel):
     instruction: str | None = Field(default=None, min_length=1, max_length=500)
+    message_text: str | None = Field(default=None, max_length=1000)   # "" = let ECHO write it again
     scheduled_at: datetime | None = None
     recurrence: Recurrence | None = None
     rrule: str | None = None
     automation_enabled: bool | None = None
-    style_preset: Literal["close_friend", "classmate", "professional", "custom"] | None = None
+    style_preset: Literal["close_friend", "partner", "family", "classmate", "professional", "custom"] | None = None
 
 
 class RunAction(BaseModel):
@@ -83,6 +86,7 @@ async def create(body: JobCreate, user_id: UUID = Depends(require_user),
             recurrence=body.recurrence,
             rrule=body.rrule,
             instruction=body.instruction,
+            message_text=body.message_text,
             style_preset=body.style_preset,
             automation_enabled=body.automation_enabled,
         ), now=utcnow())
@@ -114,6 +118,11 @@ async def update(job_id: UUID, body: JobPatch, user_id: UUID = Depends(require_u
     changes: dict = {}
     if body.instruction is not None:
         changes["instruction"] = " ".join(body.instruction.split())
+    if body.message_text is not None:
+        exact = body.message_text.strip() or None
+        if exact is not None and not fits_instagram(exact):
+            raise HTTPException(status_code=422, detail="Instagram messages can be at most 1000 bytes.")
+        changes["message_text"] = exact
     if body.automation_enabled is not None:
         changes["automation_enabled"] = body.automation_enabled
     if body.style_preset is not None:

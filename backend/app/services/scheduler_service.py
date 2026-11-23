@@ -19,6 +19,7 @@ from app.domain.recurrence import (
     to_local_naive,
     zone,
 )
+from app.domain.safety import fits_instagram
 
 MIN_LEAD = timedelta(seconds=30)
 
@@ -38,13 +39,17 @@ class JobRequest:
     style_preset: str | None = None
     automation_enabled: bool = True
     created_via: str = "ui"
+    message_text: str | None = None   # send exactly this (you wrote or picked it) instead of drafting
 
 
 async def create_job(conn: AsyncConnection, user_id: UUID, req: JobRequest, *, now: datetime) -> UUID:
     friend = await messaging_repo.get_friend(conn, user_id, req.friend_id)
     if friend is None:
         raise ScheduleError("That friend isn't in your list.")
-    instruction = " ".join(req.instruction.split())
+    message_text = (req.message_text or "").strip() or None
+    if message_text is not None and not fits_instagram(message_text):
+        raise ScheduleError("Instagram messages can be at most 1000 bytes.")
+    instruction = " ".join(req.instruction.split()) or ("Send the exact message I wrote." if message_text else "")
     if not instruction:
         raise ScheduleError("Tell ECHO what the message should say.")
     if len(instruction) > 500:
@@ -76,6 +81,7 @@ async def create_job(conn: AsyncConnection, user_id: UUID, req: JobRequest, *, n
         next_run_at=first,
         automation_enabled=req.automation_enabled,
         created_via=req.created_via,
+        message_text=message_text,
     )
     await profile_repo.audit(conn, user_id, "user" if req.created_via == "ui" else "echo", "job.created",
                              "scheduled_job", str(job_id), {"first_run_at": first.isoformat(), "rrule": rule})
@@ -153,6 +159,7 @@ def job_to_out(row: dict[str, Any]) -> dict[str, Any]:
         "recurrence_title": describe(recurrence_name(row["rrule"]), row["rrule"]),
         "rrule": row["rrule"],
         "instruction": row["instruction"],
+        "message_text": row.get("message_text"),
         "style": row["style_preset"] or row["friend_style"],
         "automation_enabled": row["automation_enabled"],
         "consent_recorded": row["friend_consent"] == "granted",

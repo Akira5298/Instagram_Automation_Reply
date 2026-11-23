@@ -80,7 +80,7 @@ struct JobDetailSheet: View {
             }
             Text("\(job.recurrence.title) · \(job.timeZoneID) · \(job.style.title)")
                 .echoReadout()
-            Text(job.instruction)
+            Text(job.messageText.map { "“\($0)”" } ?? job.instruction)
                 .font(EchoFont.body)
                 .foregroundStyle(EchoColor.textSecondary)
             Label(job.automationEnabled ? "Sends automatically when allowed" : "Draft only — waits for you",

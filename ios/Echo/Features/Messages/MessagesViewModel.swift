@@ -5,6 +5,9 @@ import Observation
 @Observable
 final class MessagesViewModel {
     var searchText = ""
+    /// Navigation stack of open chats (lets a tapped notification open one).
+    var path: [UUID] = []
+    var showingReviews = false
     let store: MessagingStore
 
     init(store: MessagingStore) {

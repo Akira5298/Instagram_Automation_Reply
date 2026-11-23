@@ -10,6 +10,7 @@ import psycopg
 import pytest
 
 from app.ai.compose_context import build_compose_context, render_friend_style
+from app.services.media import FetchedImage
 from app.services.auto_reply import keyword
 from app.worker.auto_reply import _primary_reason, _unanswered
 from tests.conftest import AUTH, requires_db
@@ -68,7 +69,15 @@ def ar(igu):  # noqa: F811
         "ai_reply_enabled": True, "consent": "granted", "style": "close_friend", "reply_delay_seconds": 0})
     assert r.status_code == 200 and r.json()["reply_delay_seconds"] == 0
     fake.sent.clear()
+    # Tests never download real images (photo tests install their own fake).
+    client.app.state.worker.auto_replies.media = NoMedia()
+    client.app.state.media = NoMedia()
     return client, fake, db_url, mika["id"]
+
+
+class NoMedia:
+    async def fetch(self, urls, limit=2):
+        return []
 
 
 def dm(client, mid: str, text: str, ts: int | None = None):
@@ -179,15 +188,103 @@ def test_questions_only_you_can_answer_and_review_first(ar):
 
 
 @requires_db
-def test_attachments_are_never_answered_blind(ar):
+def test_photos_are_looked_at_not_answered_blind(ar):
     client, fake, db_url, friend_id = ar
+    seen: list[list[str]] = []
+
+    class FakeMedia:
+        async def fetch(self, urls, limit=2):
+            seen.append(urls)
+            return [FetchedImage("image/jpeg", "aGVsbG8=")]
+
+    client.app.state.worker.auto_replies.media = FakeMedia()
     post_webhook(client, webhook_payload({
         "sender": {"id": "igsid-mika"}, "recipient": {"id": "17841400000000001"},
         "timestamp": int(time.time() * 1000),
-        "message": {"mid": "mid-img", "attachments": [{"type": "image", "payload": {"url": "https://x"}}]}}))
+        "message": {"mid": "mid-img", "attachments": [
+            {"type": "image", "payload": {"url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=1"}}]}}))
+    tick(client)
+    assert seen == [["https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=1"]]
+    assert fake.sent[-1]["text"] == "[mock] omg look at that 😍"
+
+
+@requires_db
+def test_reel_gets_a_natural_reply_and_post_gets_a_heart(ar):
+    client, fake, db_url, friend_id = ar
+    reel = {"type": "ig_reel", "payload": {"url": "https://lookaside.fbsbx.com/r/1", "title": "when the wifi dies",
+                                           "reel_video_id": "123"}}
+    post_webhook(client, webhook_payload({
+        "sender": {"id": "igsid-mika"}, "recipient": {"id": "17841400000000001"},
+        "timestamp": int(time.time() * 1000), "message": {"mid": "mid-reel", "attachments": [reel]}}))
+    tick(client)
+    assert fake.sent[-1]["text"] == "[mock] LMAOOO 😭 this is so you"
+
+    post = {"type": "ig_post", "payload": {"url": "https://lookaside.fbsbx.com/p/1", "title": "sunset 🌅"}}
+    post_webhook(client, webhook_payload({
+        "sender": {"id": "igsid-mika"}, "recipient": {"id": "17841400000000001"},
+        "timestamp": int(time.time() * 1000) + 5, "message": {"mid": "mid-post", "attachments": [post]}}))
+    tick(client)
+    assert fake.reactions == [{"to": "igsid-mika", "message_id": "mid-post", "reaction": "love"}]
+    assert replies(db_url)[-1][1] == "sent"
+    with psycopg.connect(db_url) as conn:
+        row = conn.execute("select content, sent_by from ig_messages where ig_message_id = 'reaction:mid-post'"
+                           ).fetchone()
+    assert row == ("❤️ reacted", "echo_auto")
+
+
+@requires_db
+def test_review_mode_holds_everything_with_tap_to_send_suggestions(ar):
+    client, fake, db_url, friend_id = ar
+    r = client.put("/v1/automation", headers=AUTH, json={"auto_reply_mode": "review", "reply_length": "short"})
+    assert r.status_code == 200 and r.json()["auto_reply_mode"] == "review"
+    dm(client, "mid-r1", "how was the gig")
     tick(client)
     assert fake.sent == []
-    assert client.get("/v1/reviews", headers=AUTH).json()["reviews"][0]["reason"] in ("attachment", "needs_you")
+    item = client.get("/v1/reviews", headers=AUTH).json()["reviews"][0]
+    assert item["reason"] == "review_mode"
+    assert [s["kind"] for s in item["suggestions"]] == ["text", "text", "text"]
+    assert item["suggestions"][0]["text"] == "[mock] haha how 😄"          # short
+
+    more = client.post(f"/v1/reviews/{item['id']}/suggestions", headers=AUTH).json()["suggestions"]
+    assert {"text": "❤️", "kind": "reaction"} in more and len(more) <= 6
+
+    # Tapping the ❤️ suggestion reacts instead of writing.
+    r = client.post(f"/v1/reviews/{item['id']}", headers=AUTH, json={"action": "send", "kind": "reaction"})
+    assert r.status_code == 200, r.text
+    assert fake.reactions[-1]["message_id"] == "mid-r1" and fake.sent == []
+
+    # Tapping a text suggestion sends it (with the one-time disclosure first).
+    dm(client, "mid-r2", "ok but what about saturday")
+    tick(client)
+    item = client.get("/v1/reviews", headers=AUTH).json()["reviews"][0]
+    pick = item["suggestions"][1]["text"]
+    assert client.post(f"/v1/reviews/{item['id']}", headers=AUTH,
+                       json={"action": "send", "text": pick}).status_code == 200
+    assert fake.sent[-1]["text"] == pick
+
+
+@requires_db
+def test_draft_naming_your_city_or_event_waits_for_you(ar):
+    client, fake, db_url, friend_id = ar
+    soon = datetime.now(UTC) + timedelta(hours=2)
+    r = client.put("/v1/context", headers=AUTH, json={
+        "location": {"locality": "Petaling Jaya", "region": "Selangor", "country": "Malaysia"},
+        "events": [{"start": soon.isoformat(), "end": (soon + timedelta(hours=1)).isoformat(),
+                    "all_day": False, "busy": True, "title": "Dentist"}]})
+    assert r.status_code == 200, r.text
+    dm(client, "mid-c1", "are you in petaling jaya rn")     # the mock echoes it back
+    tick(client)
+    assert fake.sent == []
+    assert client.get("/v1/reviews", headers=AUTH).json()["reviews"][0]["reason"] == "personal_info"
+    # The context reaches Claude, rendered vaguely enough to reason with.
+    worker = client.app.state.worker.auto_replies
+    b = {"user_id": worker.settings.echo_owner_user_id, "friend_id": friend_id, "language": "en",
+         "display_name": "Mika", "style": "close_friend", "default_timezone": "Asia/Kuala_Lumpur"}
+    ctx, user_ctx = client.portal.call(worker._context, b, [], datetime.now(UTC))
+    assert "Petaling Jaya" in ctx and "busy: Dentist" in ctx and user_ctx["locality"] == "Petaling Jaya"
+    assert client.delete("/v1/context", headers=AUTH).status_code == 204
+    ctx, user_ctx = client.portal.call(worker._context, b, [], datetime.now(UTC))
+    assert "<user_context>" not in ctx
 
 
 @requires_db

@@ -2,11 +2,34 @@
 
 ECHO runs entirely on your Mac: **FastAPI (Python 3.12) + local PostgreSQL + Claude API + a tunnel** (Cloudflare, or ngrok's free fixed domain via `ECHO_PUBLIC_BASE_URL`) for the public https address Meta needs. There are no hosting costs; you pay only for Claude API usage.
 
+**Phase 7 — smarter replies.**
+- **Tap-to-send suggestions in Needs you:** every held reply comes with 2–3 options in your voice (yes / no / maybe-style), plus ❤️ React. Tap one to send it, long-press to edit, or write your own. **More options** asks for fresh ones.
+- **Reply mode** (Settings → Automatic replies): *Fully automatic*, or *Review every reply* (everything waits in Needs you with suggestions).
+- **Reply length:** Short, Medium, Long or Adaptive (mirrors the friend and how you usually write to them).
+- **Learns from your chats:** after every few messages you type yourself, ECHO refines how you write to *that* person (tone, slang, nicknames, emoji, humour, length) and a few general habits for your profile. See and reset it in each friend's **Reply style**. ECHO never learns from its own replies. Turn off with **Learn from my chats**.
+- **Shared posts, Reels and photos:** ECHO reads the caption and looks at photos/post previews, then answers like you would: a short comment, emoji, or a ❤️ reaction. It can't watch videos, so it keeps those replies general. Voice notes still come to you.
+- **Message ideas in the Scheduler:** ✨ Suggest gives ideas that fit the relationship (jokes for close friends, sweet ones for a partner, check-ins for family), optionally for an occasion. Pick one and it's sent **word for word**. New presets: **Partner** and **Family**.
+- **Your day (optional):** share your **city** (never GPS coordinates) and **calendar busy times** for the next 36 h, so replies know when you're busy. ECHO never volunteers where you are or what you're doing; a draft that names your city or an event waits for your OK.
+- **Push is off in this build** (free Apple account). Everything else, including live updates, works. To turn push on later, see [`docs/TESTFLIGHT.md`](docs/TESTFLIGHT.md) §3.
+
+**Phase 6 — ready to live with.**
+- **Push notifications** via APNs from your Mac, including "Send test". Tapping one opens the chat or the **Needs you** queue. Setup: [`docs/TESTFLIGHT.md`](docs/TESTFLIGHT.md) §3.
+- **Quiet hours:** no pushes overnight, and optionally no automatic replies either. Notification preferences now live on your server.
+- **Friend memories:** **What ECHO remembers about…** in each chat. You add, pause, approve or forget them. Sensitive ones expire after at most 90 days, and only approved ones are used.
+- **Security review** ([`docs/SECURITY.md`](docs/SECURITY.md)):
+  - secrets are masked in all logs
+  - weak tokens are refused over the tunnel
+  - repeated token guessing is throttled
+  - API docs are local-only
+  - security headers and a body-size limit
+  - a prompt-injection backstop
+- **TestFlight-ready:** app icon, privacy manifest, export-compliance key, push entitlement, and a step-by-step guide.
+
 **Phase 5 — automatic replies.** When a friend who agreed DMs you, ECHO answers in your voice:
 - **Gates, in order:** consent, AI on, you haven't taken over, global pause, daily limits, safety check, then Meta's 24-hour window. All of them are deterministic code; Claude only writes the text.
 - **Waits a moment first** (per friend, default 45 s), so a burst of messages gets one reply.
 - **Steps back when you reply yourself**, from ECHO or the Instagram app, for 30 minutes (configurable). You can also "Take over" a chat explicitly.
-- **Holds drafts for you** when a message involves money, plans, commitments, something sensitive or emotional, a photo it can't see, or anything only you can answer. They go to the **Needs you** queue, where you edit, send or dismiss them. You can also set a friend to "check every reply with me".
+- **Holds drafts for you** when a message involves money, plans, commitments, something sensitive or emotional, or anything only you can answer. They go to the **Needs you** queue, where you edit, send or dismiss them. You can also set a friend to "check every reply with me".
 - **Consent by DM:** "Ask by DM" sends your consent request; a YES reply grants consent and STOP revokes it, recorded automatically with the message as evidence.
 - **Per-friend reply style:** tone, formality, emoji, length, topics to avoid, custom instructions.
 - **Live:** the app keeps one long-poll request open (`/v1/updates`, about 2 requests a minute), so new DMs, ECHO's replies and held drafts appear within a second or two, with no manual refresh.
@@ -69,13 +92,15 @@ Instagram_App/
 │   │   ├── integrations/meta/        # Instagram Graph API client, webhook signatures, signed_request
 │   │   ├── services/                 # chat, scheduler, instagram, webhooks, auto_reply (inbound/consent/takeover), delivery
 │   │   ├── worker/runner.py          # scheduler + webhook processing + hourly maintenance
-│   │   ├── worker/auto_reply.py      # Phase 5: automatic-reply pipeline (gates → Claude → send)
+│   │   ├── worker/auto_reply.py      # automatic-reply pipeline (gates → Claude → send / react / hold with suggestions)
+│   │   ├── services/style_learning.py# learns how you write to each friend (hourly)
+│   │   ├── services/media.py         # shared posts/Reels/photos → text + safe image fetch
 │   │   └── api/                      # /v1/* , /webhooks/meta , /privacy
-│   ├── migrations/0001…0007.sql      # plain PostgreSQL
-│   ├── tests/                        # 153 tests (fake Graph API + real PostgreSQL)
+│   ├── migrations/0001…0009.sql      # plain PostgreSQL
+│   ├── tests/                        # 179 tests (fake Graph API + real PostgreSQL)
 │   └── .env.example
 ├── ios/                              # SwiftUI app (XcodeGen project.yml)
-└── docs/ARCHITECTURE.md, docs/META_SETUP.md
+└── docs/ARCHITECTURE.md, META_SETUP.md, TESTFLIGHT.md, SECURITY.md
 ```
 
 ## Laptop-specific behaviour
@@ -93,4 +118,4 @@ createdb echo_test   # disposable; tests wipe it
 ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test .venv/bin/python -m pytest -q
 ```
 
-The suite has 153 tests, including the automatic-reply pipeline end to end, the migration runner and tunnel URL resolution. iOS: ⌘U.
+The suite has 179 tests, including the automatic-reply pipeline end to end, the migration runner and tunnel URL resolution. iOS: ⌘U.

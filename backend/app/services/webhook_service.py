@@ -32,7 +32,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from app.db import messaging_repo
-from app.services import auto_reply
+from app.services import auto_reply, media
 from app.services.instagram_service import InstagramService
 
 log = logging.getLogger("echo.webhooks")
@@ -133,10 +133,11 @@ class WebhookProcessor:
         recipient = str((event.get("recipient") or {}).get("id") or "")
         at = datetime.fromtimestamp(int(event.get("timestamp") or 0) / 1000, tz=UTC) if event.get("timestamp") \
             else self.clock()
+        attachments = media.normalise_attachments(message.get("attachments"))
+        reply_to_story = bool((message.get("reply_to") or {}).get("story"))
         text = message.get("text")
-        if text is None and message.get("attachments"):
-            kinds = ", ".join(sorted({a.get("type", "attachment") for a in message["attachments"]}))
-            text = f"[{kinds}]"
+        if attachments or reply_to_story:
+            text = media.describe(text, attachments, reply_to_story)
         if message.get("is_unsupported"):
             text = text or "[unsupported message]"
 
@@ -164,7 +165,7 @@ class WebhookProcessor:
         if await messaging_repo.message_exists(conn, mid):
             return "ignored"
         await messaging_repo.record_inbound(conn, user_id=account["user_id"], friend_id=friend["id"],
-                                            text=text or "", mid=mid, at=at)
+                                            text=text or "", mid=mid, at=at, attachments=attachments)
         await auto_reply.on_inbound(conn, user_id=account["user_id"], friend=friend, mid=mid, text=text,
                                     at=at, now=self.clock())
         return "done"

@@ -4,10 +4,9 @@ struct MessagesView: View {
     @Bindable var viewModel: MessagesViewModel
     @Binding var settings: AppSettings
     var onTogglePause: (Bool) -> Void = { _ in }
-    @State private var showingReviews = false
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $viewModel.path) {
             ZStack {
                 EchoBackground()
                 ScrollView {
@@ -15,7 +14,7 @@ struct MessagesView: View {
                         AutomationBanner(settings: $settings, onTogglePause: onTogglePause, automatedCount: viewModel.automatedCount)
 
                         if !viewModel.store.reviews.isEmpty {
-                            ReviewBanner(count: viewModel.store.reviews.count) { showingReviews = true }
+                            ReviewBanner(count: viewModel.store.reviews.count) { viewModel.showingReviews = true }
                         }
 
                         if viewModel.isMock {
@@ -74,7 +73,7 @@ struct MessagesView: View {
             } message: {
                 Text(viewModel.store.errorMessage ?? "")
             }
-            .sheet(isPresented: $showingReviews) {
+            .sheet(isPresented: $viewModel.showingReviews) {
                 ReviewQueueView(store: viewModel.store)
             }
             .navigationDestination(for: UUID.self) { id in

@@ -1,6 +1,6 @@
 # ECHO — Architecture Overview
 
-*Updated for Phase 5 (automatic replies) · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
+*Updated for Phase 7 (suggestions, reactions, style learning, media, context) · November 2026 · Owner timezone: Asia/Kuala_Lumpur*
 
 ## 1. The short version
 
@@ -121,12 +121,12 @@ Worker: claim due auto_replies (FOR UPDATE SKIP LOCKED, lease) ─▶ worker/aut
   1 stale? newer message → superseded · someone replied after it → skipped
   2 pause / AI off / no consent / taken over → skipped · older than 2 h → blocked + notify
   3 daily limit (per friend, per account) → blocked + notify (once a day)
-  4 Claude (REPLY_SYSTEM_PROMPT): action reply | no_reply | needs_user, text, flags
-  5 SAFETY GATE: model flags ∪ keyword pass (friend's messages + draft) ∪ attachment ∪ needs_user
-       ∪ "review first" → needs_attention + review_items + notify; stop
+  4 Claude (REPLY_SYSTEM_PROMPT + up to 2 photos): action reply | react | no_reply | needs_user, text, alternatives, flags
+  5 SAFETY GATE: model flags ∪ keyword pass (friend's messages + draft) ∪ personal_info ∪ needs_user
+       ∪ "review first" ∪ reply mode = review → needs_attention + review_items(suggestions) + notify; stop
   6 stale again? (drafting takes seconds)
   7 evaluate_send_eligibility() on fresh state (24h window −5 min, consent, AI, takeover, pause, account)
-  8 services/delivery.deliver: outbound ledger (idempotency key auto:<mid>, reply_to_inbound_id UNIQUE)
+  8 services/delivery.deliver (or deliver_reaction for ❤️): outbound ledger (idempotency key auto:<mid>, reply_to_inbound_id UNIQUE)
        → disclosure if due → POST graph.facebook.com/<v>/<IG_ID>/messages → record as echo_auto → notify
   errors: transient → retry with backoff (re-runs every gate) · unknown outcome → failed, never retried
 Review queue (/v1/reviews): send (edited or not; consent + window + account re-checked) · dismiss · sent_manually
@@ -139,6 +139,29 @@ The model never decides whether a message may be sent; it only drafts and raises
 - your own reply goes to `on_manual_outbound`
 
 **Live app updates.** `GET /v1/updates?since=<cursor>&wait=25` is a long poll. The cursor is the latest change across messages, reviews, friends, notifications and auto replies. The app keeps one request open while in the foreground and reloads when it changes. Each conversation also carries `last_auto_reply` (status + plain-words reason), so the app can say why ECHO did or didn't reply.
+
+### 3.2a Notifications, quiet hours, memories — Phase 6
+
+- **Outbox → APNs.** `notify()` writes `notification_outbox`.
+  - It's filtered by your preferences and stored as `suppressed` during quiet hours. Quiet hours are local times in `default_timezone`, and ranges across midnight work.
+  - The worker's dispatcher hands pending rows to `ApnsNotificationSender` (`services/push.py`).
+  - Auth: an ES256 JWT from your `.p8` key, cached 45 min.
+  - Transport: HTTP/2 to `api.push.apple.com` or `api.sandbox…`, chosen per device. The app reports `sandbox` for Xcode builds and `production` for TestFlight.
+  - APNs responses: 410/`BadDeviceToken` disables the device. `*ProviderToken` refreshes the JWT. 429/5xx is retried by the outbox (5 attempts).
+  - Payload: `friend_id`, `auto_reply_id` and `category`, so a tap opens the right chat or the review queue. `thread-id` groups pushes per friend.
+- **Quiet hours and replies.** With `quiet_hours_hold_replies`, the auto-reply gate skips with `quiet_hours`.
+- **Memories.** `/v1/friends/{id}/memories`, `/v1/memories/{id}`. Only approved, unexpired ones are used (≤5 per draft). Sensitive ones always expire (default 30, max 90 days). Expired ones are deleted when listed.
+- **Hardening.** `core/hardening.py` is the outermost middleware; `docs/SECURITY.md` has the full review.
+
+### 3.2b Smarter replies — Phase 7
+
+- **One draft, several options.** `draft_reply` returns `action` (`reply` | `react` | `no_reply` | `needs_user`), the message and 2–3 `alternatives`, all in your voice. When a reply is held (safety flag, `review_first`, or account **reply mode = review**), the draft plus alternatives are stored on `review_items.suggestions` as `{text, kind}`. `POST /v1/reviews/{id}` accepts `kind: "reaction"`; `POST /v1/reviews/{id}/suggestions` regenerates options.
+- **Reactions.** `react` → `delivery.deliver_reaction` → `POST /{IG_ID}/messages` with `sender_action: "react"` and `reaction: "love"` (the only reaction ECHO sends). Same ledger and one-reply-per-message key as text; no disclosure (no AI-written words). The thread records `❤️ reacted` under a synthetic id `reaction:<mid>`.
+- **Media.** `services/media.py` normalises webhook attachments (`ig_post`, `ig_reel`/`reel`, image, video, audio, file, story types; the legacy `share` is dropped when `ig_post` is present) into `[Reel: “caption”]`-style text, stored with the message. Up to two photos/post previews from the unanswered messages are downloaded (jpeg/png/gif/webp ≤ 5 MB, Meta CDN hosts only, redirects re-checked) and passed to Claude as image blocks. Videos and audio are never downloaded.
+- **Length.** `app_users.reply_length` → `<reply_length>` in the context; Adaptive mirrors the friend and the learned length.
+- **Style learning** (`services/style_learning.py`, hourly in maintenance, or **Learn now**). Friends with ≥ 5 new `user_manual` messages since `friends.style_learned_through` → transcript (your lines as `Me:`, theirs as `Them:`, ECHO's own excluded) → Haiku `learn_style` → `clean_learned` (clamped, PII-stripped) → `friend_style_profiles.learned`. Up to 4 general style observations go through the normal `sanitize`/`merge` rules (tentative, your edits win, rejected keys never return). Rendered as `learned …` lines; your rules render after as `rule (from the user, wins)`.
+- **Context** (`api/context.py`). The phone uploads `{location: {locality, region, country}, events: [{start, end, all_day, busy, title?}]}`; the server keeps the next 36 h (≤ 30 events). Drafts use it only while fresh (place < 6 h, calendar < 12 h). Deterministic gate: a draft containing your locality or an event title is held as `personal_info`.
+- **Scheduled exact text.** `scheduled_jobs.message_text` is sent verbatim: no compose step, no safety hold (you wrote or picked it). Meta eligibility still runs right before sending. `POST /v1/friends/{id}/message-suggestions` returns ideas `{text, vibe}` per relationship preset (`partner`, `family` added).
 
 ### 3.3 Scheduled message (Feature 4)
 
@@ -170,7 +193,7 @@ Each worker tick (every 5 s by default) does four things:
       - Transient errors back off (30 s → 15 min, up to 5 attempts). Eligibility is re-checked on every attempt.
       - Permanent errors fail the run.
       - An unknown outcome fails the run and is never retried.
-4. **Notify.** The outbox respects your notification preferences. A logging sender handles delivery for now; APNs arrives in Phase 6.
+4. **Notify.** The outbox respects your notification preferences and quiet hours. Delivery is APNs when configured (§3.2a), otherwise a logging sender.
 
 Supporting pieces:
 - **Recurrence** (`domain/recurrence.py`): jobs store the IANA zone, the local wall time and an RRULE. Only presets and DAILY/WEEKLY/MONTHLY custom rules are allowed (no sub-daily spam). Recurrence stays correct across DST: a nonexistent local time runs just after the gap, and a repeated local time runs once.
@@ -302,7 +325,7 @@ Moving to a hosted server later needs no code changes. Set `ECHO_PUBLIC_BASE_URL
 | Rate limits | Per-account token bucket in the worker; honour `429` / error-code backoff |
 | Timezones | IANA zone + local time + RRULE; everything stored as `timestamptz` |
 | Runs without the phone | Worker on the Mac backend; iOS background tasks are never relied on |
-| Observability | JSON logs with request and job ids; Sentry (or similar) in Phase 6 |
+| Observability | JSON logs (secrets redacted) with request and job ids; `python -m app.doctor` |
 
 ## 8. Phase plan
 
@@ -313,4 +336,6 @@ Moving to a hosted server later needs no code changes. Set `ECHO_PUBLIC_BASE_URL
 | 3 | Scheduler: jobs/friends/automation APIs, durable worker, DST-safe RRULE, safety + eligibility gates, mock messaging provider, activity feed, chat-created jobs | ✅ |
 | 4 | Instagram API with Unified Login (Facebook Login for Business + config_id; legacy Instagram Login optional), encrypted tokens, signed webhooks → inbound/echo processing, Graph API delivery, conversation sync, deauthorize/data-deletion callbacks, privacy page, Meta setup + App Review guide | ✅ |
 | 5 | Autonomous replies (debounced, gated, idempotent), review queue with edit-and-send, takeover (manual and automatic), consent by DM (YES/STOP), per-friend delay/review/limits/style, account settings | ✅ |
-| 6 | Polish, APNs push delivery, quiet hours, friend memories UI, security review, TestFlight (optional: Sign in with Apple) | next |
+| 6 | APNs push + deep links, quiet hours (server-side prefs), friend memories UI, live updates, security review + hardening, TestFlight readiness (icon, privacy manifest, export compliance, guide) | ✅ |
+| 7 | Tap-to-send suggestions + ❤️ reactions, reply mode (auto/review), reply length, style learning from your own chats (per friend + profile), photos/posts/Reels understood, scheduler ideas + exact text, partner/family presets, optional city + calendar context, push disabled for free Apple accounts | ✅ |
+| later | Optional: Sign in with Apple per device, App Store release, hosted backend | |

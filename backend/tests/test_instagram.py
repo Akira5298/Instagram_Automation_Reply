@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo

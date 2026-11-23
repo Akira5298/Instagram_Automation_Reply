@@ -23,7 +23,9 @@ struct ReviewQueueView: View {
                                     set: { edits[item.id] = $0 }
                                 ),
                                 busy: busy.contains(item.id),
-                                onAction: { action in resolve(item, action) }
+                                onAction: { action in resolve(item, action) },
+                                onPick: { suggestion in send(item, suggestion) },
+                                onMore: { more(item) }
                             )
                         }
                         if store.reviews.isEmpty {
@@ -50,6 +52,26 @@ struct ReviewQueueView: View {
         }
     }
 
+    /// One tap on a suggestion sends it as is (words, or a ❤️ reaction).
+    private func send(_ item: ReviewItem, _ suggestion: ReviewItem.Suggestion) {
+        busy.insert(item.id)
+        Task {
+            let ok = await store.resolveReview(item, action: .send,
+                                               text: suggestion.kind == .text ? suggestion.text : nil,
+                                               kind: suggestion.kind)
+            busy.remove(item.id)
+            if ok { edits[item.id] = nil; Haptics.success() } else { Haptics.warning() }
+        }
+    }
+
+    private func more(_ item: ReviewItem) {
+        busy.insert(item.id)
+        Task {
+            await store.moreSuggestions(for: item)
+            busy.remove(item.id)
+        }
+    }
+
     private func resolve(_ item: ReviewItem, _ action: ReviewItem.Action) {
         busy.insert(item.id)
         let edited = edits[item.id]
@@ -72,8 +94,11 @@ struct ReviewCard: View {
     @Binding var text: String
     let busy: Bool
     let onAction: (ReviewItem.Action) -> Void
+    var onPick: (ReviewItem.Suggestion) -> Void = { _ in }
+    var onMore: () -> Void = {}
 
     private var windowOpen: Bool { item.windowOpen() }
+    private var canSend: Bool { !busy && (item.origin != .autoReply || windowOpen) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: EchoSpacing.sm) {
@@ -106,6 +131,41 @@ struct ReviewCard: View {
             Label("Held because it \(item.reasonText)", systemImage: item.systemImage)
                 .font(EchoFont.caption)
                 .foregroundStyle(EchoColor.warning)
+
+            if !item.options.isEmpty {
+                Text("Tap to send").echoReadout()
+                VStack(alignment: .leading, spacing: EchoSpacing.xs) {
+                    ForEach(item.options) { option in
+                        SuggestionChip(option: option) { onPick(option) }
+                            .disabled(!canSend)
+                            .contextMenu {
+                                if option.kind == .text {
+                                    Button("Edit before sending", systemImage: "pencil") { text = option.text }
+                                }
+                            }
+                    }
+                    if item.origin == .autoReply {
+                        HStack {
+                            if !item.options.contains(where: { $0.kind == .reaction }) {
+                                SuggestionChip(option: .init(text: "❤️", kind: .reaction)) {
+                                    onPick(.init(text: "❤️", kind: .reaction))
+                                }
+                                .disabled(!canSend)
+                            }
+                            Button {
+                                onMore()
+                            } label: {
+                                Label("More options", systemImage: "sparkles")
+                                    .font(EchoFont.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(EchoColor.cyan)
+                            .disabled(busy)
+                        }
+                    }
+                }
+                Text("Or write your own").echoReadout()
+            }
 
             TextField("Your reply", text: $text, axis: .vertical)
                 .lineLimit(2...6)
@@ -145,6 +205,37 @@ struct ReviewCard: View {
         }
         .foregroundStyle(EchoColor.textPrimary)
         .glassCard(glow: EchoColor.warning)
+    }
+}
+
+/// A tap-to-send suggestion. Long-press a text one to edit it first.
+struct SuggestionChip: View {
+    let option: ReviewItem.Suggestion
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if option.kind == .reaction {
+                    Text("❤️")
+                    Text("React").font(EchoFont.caption)
+                } else {
+                    Text(option.text).multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                    Image(systemName: "paperplane").font(.caption)
+                }
+            }
+            .font(EchoFont.body)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: option.kind == .reaction ? nil : .infinity, alignment: .leading)
+            .background(EchoColor.neonPurple.opacity(0.16), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(EchoColor.neonPurple.opacity(0.45)))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(EchoColor.textPrimary)
+        .accessibilityLabel(option.kind == .reaction ? "React with a heart" : "Send: \(option.text)")
+        .accessibilityHint(option.kind == .text ? "Long press to edit first" : "")
     }
 }
 

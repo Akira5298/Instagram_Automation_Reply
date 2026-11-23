@@ -4,6 +4,8 @@ import SwiftUI
 struct Friend: Identifiable, Codable, Hashable, Sendable {
     enum StylePreset: String, Codable, CaseIterable, Identifiable, Sendable {
         case closeFriend = "close_friend"
+        case partner
+        case family
         case classmate
         case professional
         case custom
@@ -13,6 +15,8 @@ struct Friend: Identifiable, Codable, Hashable, Sendable {
         var title: String {
             switch self {
             case .closeFriend: return "Close friend"
+            case .partner: return "Partner"
+            case .family: return "Family"
             case .classmate: return "Classmate"
             case .professional: return "Professional"
             case .custom: return "Custom"
@@ -22,6 +26,8 @@ struct Friend: Identifiable, Codable, Hashable, Sendable {
         var summary: String {
             switch self {
             case .closeFriend: return "Casual, funny, short, natural emoji"
+            case .partner: return "Warm, affectionate, a little playful"
+            case .family: return "Warm, caring check-ins"
             case .classmate: return "Friendly, clear, moderately casual"
             case .professional: return "Polite, more formal, no slang"
             case .custom: return "Your own rules"

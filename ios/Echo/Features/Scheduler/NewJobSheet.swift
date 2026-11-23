@@ -8,6 +8,17 @@ struct NewJobSheet: View {
     @State private var date = Date.now.addingTimeInterval(3600)
     @State private var recurrence: ScheduledJob.Recurrence = .once
     @State private var instruction = ""
+    @State private var mode: Mode = .instruction
+    @State private var exactText = ""
+    @State private var occasion = ""
+    @State private var ideas: [MessageIdea] = []
+    @State private var loadingIdeas = false
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case instruction, exact
+        var id: String { rawValue }
+        var title: String { self == .instruction ? "ECHO writes it" : "Exact message" }
+    }
     @State private var automationEnabled = true
     @State private var isSaving = false
     @State private var saveError: String?
@@ -17,7 +28,7 @@ struct NewJobSheet: View {
 
     private var canSave: Bool {
         selectedFriend != nil
-            && !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !(mode == .instruction ? instruction : exactText).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && date > .now
     }
 
@@ -53,11 +64,60 @@ struct NewJobSheet: View {
                 }
                 .environment(\.timeZone, viewModel.timeZone)
 
-                Section("What should ECHO say?") {
-                    TextField("e.g. Ask if they're free this weekend", text: $instruction, axis: .vertical)
-                        .lineLimit(2...5)
+                Section {
+                    Picker("Message", selection: $mode) {
+                        ForEach(Mode.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    if mode == .instruction {
+                        TextField("e.g. Ask if they're free this weekend", text: $instruction, axis: .vertical)
+                            .lineLimit(2...5)
+                    } else {
+                        TextField("The exact words to send", text: $exactText, axis: .vertical)
+                            .lineLimit(2...6)
+                    }
                     Toggle("Send automatically", isOn: $automationEnabled)
                         .tint(EchoColor.neonPurple)
+                } header: {
+                    Text("What should it say?")
+                } footer: {
+                    Text(mode == .instruction
+                         ? "ECHO writes it in your voice right before sending."
+                         : "Sent word for word — no AI draft. Instagram's rules still apply.")
+                }
+
+                if let friend = selectedFriend {
+                    Section {
+                        HStack {
+                            TextField("Occasion (optional): good morning, her exam…", text: $occasion)
+                            Button {
+                                Task {
+                                    loadingIdeas = true
+                                    ideas = await viewModel.ideas(for: friend, occasion: occasion)
+                                    loadingIdeas = false
+                                }
+                            } label: {
+                                if loadingIdeas { ProgressView() } else { Label("Suggest", systemImage: "sparkles") }
+                            }
+                            .disabled(loadingIdeas)
+                        }
+                        ForEach(ideas) { idea in
+                            Button {
+                                mode = .exact
+                                exactText = idea.text
+                                Haptics.select()
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(idea.text).foregroundStyle(EchoColor.textPrimary)
+                                    Text(idea.vibe).echoReadout()
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("Ideas for \(friend.firstName)")
+                    } footer: {
+                        Text("Written the way you talk to \(friend.firstName) (\(friend.style.title.lowercased())). Tap one to use it, then edit if you like.")
+                    }
                 }
 
                 if let saveError {
@@ -94,8 +154,9 @@ struct NewJobSheet: View {
                                 friend: friend,
                                 date: date,
                                 recurrence: recurrence,
-                                instruction: instruction,
-                                automationEnabled: automationEnabled
+                                instruction: mode == .instruction ? instruction : "",
+                                automationEnabled: automationEnabled,
+                                messageText: mode == .exact ? exactText : nil
                             )
                             isSaving = false
                             if ok {

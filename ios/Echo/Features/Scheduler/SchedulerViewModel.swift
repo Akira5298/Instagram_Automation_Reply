@@ -88,6 +88,11 @@ final class SchedulerViewModel {
     func runNow(_ job: ScheduledJob) async { await store.runNow(job) }
     func refresh() async { await store.refresh() }
 
+    func ideas(for friend: Friend, occasion: String) async -> [MessageIdea] {
+        let trimmed = occasion.trimmingCharacters(in: .whitespacesAndNewlines)
+        return await store.messageIdeas(for: friend, occasion: trimmed.isEmpty ? nil : trimmed)
+    }
+
     var errorMessage: String? {
         get { store.errorMessage }
         set { store.errorMessage = newValue }
@@ -97,14 +102,16 @@ final class SchedulerViewModel {
     /// message is decided by the backend's checks at dispatch time.
     @discardableResult
     func createJob(friend: Friend, date: Date, recurrence: ScheduledJob.Recurrence, instruction: String,
-                   automationEnabled: Bool) async -> Bool {
-        await store.createJob(NewJobDraft(
+                   automationEnabled: Bool, messageText: String? = nil) async -> Bool {
+        let exact = messageText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return await store.createJob(NewJobDraft(
             friend: friend,
             scheduledAt: date,
             timeZoneID: timeZone.identifier,
             recurrence: recurrence,
             instruction: instruction.trimmingCharacters(in: .whitespacesAndNewlines),
-            automationEnabled: automationEnabled
+            automationEnabled: automationEnabled,
+            messageText: (exact?.isEmpty ?? true) ? nil : exact
         ))
     }
 }

@@ -9,12 +9,15 @@ struct FriendStyleSheet: View {
     @State private var topics = ""
     @State private var loaded = false
     @State private var saving = false
+    @State private var learning = false
 
     var body: some View {
         NavigationStack {
             ZStack {
                 EchoBackground()
                 Form {
+                    learnedSection
+
                     Section {
                         TextField("e.g. teasing, warm, to the point", text: Binding(
                             get: { style.tone ?? "" }, set: { style.tone = $0 }))
@@ -61,6 +64,63 @@ struct FriendStyleSheet: View {
                     topics = loadedStyle.avoidTopics.joined(separator: ", ")
                 }
                 loaded = true
+            }
+        }
+    }
+
+    /// What ECHO picked up from the messages you typed to this friend yourself.
+    @ViewBuilder private var learnedSection: some View {
+        Section {
+            if let learned = style.learned, !learned.isEmpty {
+                if let tone = learned.tone, !tone.isEmpty { LabeledContent("Tone", value: tone) }
+                if let length = learned.typicalLength { LabeledContent("Usual length", value: length.capitalized) }
+                if let emoji = learned.favouriteEmoji, !emoji.isEmpty {
+                    LabeledContent("Favourite emoji", value: emoji.joined(separator: " "))
+                }
+                if let phrases = learned.phrases, !phrases.isEmpty {
+                    LabeledContent("Your words with them") {
+                        Text(phrases.joined(separator: ", ")).multilineTextAlignment(.trailing)
+                    }
+                }
+                if let humor = learned.humor, !humor.isEmpty { LabeledContent("Humour", value: humor) }
+                if let language = learned.language, !language.isEmpty { LabeledContent("Language", value: language) }
+                if let notes = learned.notes, !notes.isEmpty {
+                    Text(notes).font(EchoFont.footnote).foregroundStyle(EchoColor.textSecondary)
+                }
+                Button("Forget what ECHO learned", role: .destructive) {
+                    Task {
+                        if await store.forgetLearnedStyle(for: friend) {
+                            style.learned = nil
+                            style.learnedMessageCount = 0
+                        }
+                    }
+                }
+            } else {
+                Text("Nothing yet. ECHO learns from messages you type to \(friend.firstName) yourself.")
+                    .foregroundStyle(EchoColor.textTertiary)
+            }
+            Button {
+                Task {
+                    learning = true
+                    if let fresh = await store.learnStyleNow(for: friend) {
+                        style.learned = fresh.learned
+                        style.learnedAt = fresh.learnedAt
+                        style.learnedMessageCount = fresh.learnedMessageCount
+                        Haptics.success()
+                    }
+                    learning = false
+                }
+            } label: {
+                if learning { ProgressView() } else { Label("Learn from our chat now", systemImage: "sparkles") }
+            }
+            .disabled(learning)
+        } header: {
+            Text("Learned from your chats")
+        } footer: {
+            if let at = style.learnedAt {
+                Text("From \(style.learnedMessageCount ?? 0) of your messages · updated \(at.formatted(.relative(presentation: .named))). Your rules below always win.")
+            } else {
+                Text("ECHO looks again after every few new messages you send (turn this off in Settings → Learn from my chats). Your rules below always win.")
             }
         }
     }

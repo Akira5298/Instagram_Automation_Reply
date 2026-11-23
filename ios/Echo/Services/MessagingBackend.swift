@@ -32,15 +32,36 @@ protocol MessagingBackend {
 
     // Automatic replies (Phase 5)
     func loadReviews() async throws -> [ReviewItem]
-    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?) async throws
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?,
+                       kind: ReviewItem.Suggestion.Kind) async throws
+    /// "More options": fresh tap-to-send suggestions for an open reply.
+    func moreSuggestions(for item: ReviewItem) async throws -> [ReviewItem.Suggestion]
     func takeOver(_ friend: Friend) async throws -> Friend
     func handBack(_ friend: Friend) async throws -> Friend
     func requestConsent(_ friend: Friend) async throws -> Friend
     func loadStyle(for friend: Friend) async throws -> FriendStyle
     func saveStyle(_ style: FriendStyle, for friend: Friend) async throws -> FriendStyle
+    func learnStyleNow(for friend: Friend) async throws -> FriendStyle
+    func forgetLearnedStyle(for friend: Friend) async throws
+    func messageIdeas(for friend: Friend, occasion: String?, count: Int) async throws -> [MessageIdea]
+    /// Rough location + upcoming calendar, so replies know when you're busy.
+    func uploadContext(_ context: UserContextUpload) async throws
+    func clearContext() async throws
     /// nil in mock mode.
     func loadAutomationSettings() async throws -> AutomationSettings?
     func saveAutomationSettings(_ settings: AutomationSettings) async throws -> AutomationSettings?
+
+    // Phase 6: push, notification preferences, friend memories
+    func registerDevice(token: String, environment: String) async throws
+    /// Returns a short human-readable result.
+    func sendTestPush() async throws -> String
+    /// nil in mock mode.
+    func loadNotificationPreferences() async throws -> NotificationPreferences?
+    func saveNotificationPreferences(_ preferences: NotificationPreferences) async throws
+    func loadMemories(for friend: Friend) async throws -> [FriendMemory]
+    func addMemory(_ content: String, sensitive: Bool, for friend: Friend) async throws -> FriendMemory
+    func updateMemory(_ memory: FriendMemory) async throws -> FriendMemory
+    func deleteMemory(_ memory: FriendMemory) async throws
 
     // Instagram connection (backend only)
     func loadInstagramStatus() async throws -> InstagramStatus?
@@ -91,6 +112,7 @@ final class RemoteMessagingBackend: MessagingBackend {
         let recurrence: ScheduledJob.Recurrence
         let instruction: String
         let automationEnabled: Bool
+        let messageText: String?
     }
 
     private struct RunActionBody: Encodable { let action: JobRun.Action }
@@ -139,7 +161,8 @@ final class RemoteMessagingBackend: MessagingBackend {
             timezone: draft.timeZoneID,
             recurrence: draft.recurrence,
             instruction: draft.instruction,
-            automationEnabled: draft.automationEnabled
+            automationEnabled: draft.automationEnabled,
+            messageText: draft.messageText
         ))
     }
 
@@ -190,7 +213,14 @@ final class RemoteMessagingBackend: MessagingBackend {
 
 extension RemoteMessagingBackend {
     private struct ReviewsResponse: Decodable { let reviews: [ReviewItem] }
-    private struct ReviewBody: Encodable { let action: ReviewItem.Action; let text: String? }
+    private struct ReviewBody: Encodable {
+        let action: ReviewItem.Action
+        let text: String?
+        let kind: ReviewItem.Suggestion.Kind
+    }
+    private struct SuggestionsResponse: Decodable { let suggestions: [ReviewItem.Suggestion] }
+    private struct IdeasResponse: Decodable { let suggestions: [MessageIdea] }
+    private struct IdeasBody: Encodable { let occasion: String?; let count: Int }
     private struct NoBody: Encodable {}
     private struct Resolved: Decodable { let status: String }
 
@@ -201,8 +231,39 @@ extension RemoteMessagingBackend {
         return response.reviews
     }
 
-    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?) async throws {
-        let _: Resolved = try await apiClient.post("v1/reviews/\(path(item.id))", body: ReviewBody(action: action, text: text))
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?,
+                       kind: ReviewItem.Suggestion.Kind) async throws {
+        let body = ReviewBody(action: action, text: kind == .reaction ? nil : text, kind: kind)
+        let _: Resolved = try await apiClient.post("v1/reviews/\(path(item.id))", body: body)
+    }
+
+    func moreSuggestions(for item: ReviewItem) async throws -> [ReviewItem.Suggestion] {
+        let response: SuggestionsResponse = try await apiClient.post("v1/reviews/\(path(item.id))/suggestions",
+                                                                     body: NoBody())
+        return response.suggestions
+    }
+
+    func learnStyleNow(for friend: Friend) async throws -> FriendStyle {
+        try await apiClient.post("v1/friends/\(path(friend.id))/style/learn", body: NoBody())
+    }
+
+    func forgetLearnedStyle(for friend: Friend) async throws {
+        try await apiClient.delete("v1/friends/\(path(friend.id))/style/learned")
+    }
+
+    func messageIdeas(for friend: Friend, occasion: String?, count: Int) async throws -> [MessageIdea] {
+        let response: IdeasResponse = try await apiClient.post(
+            "v1/friends/\(path(friend.id))/message-suggestions", body: IdeasBody(occasion: occasion, count: count))
+        return response.suggestions
+    }
+
+    func uploadContext(_ context: UserContextUpload) async throws {
+        let body = try APIClient.encoder.encode(context)
+        _ = try await apiClient.send("PUT", "v1/context", body: body)
+    }
+
+    func clearContext() async throws {
+        try await apiClient.delete("v1/context")
     }
 
     func takeOver(_ friend: Friend) async throws -> Friend {
@@ -236,13 +297,78 @@ extension RemoteMessagingBackend {
         let dailyReplyLimit: Int
         let consentRequestText: String
         let aiDisclosureText: String
+        let autoReplyMode: AutomationSettings.ReplyMode?
+        let replyLength: AutomationSettings.ReplyLength?
+        let learnFromChats: Bool?
     }
 
     func saveAutomationSettings(_ settings: AutomationSettings) async throws -> AutomationSettings? {
         let body = try APIClient.encoder.encode(SettingsBody(
             takeoverMinutes: settings.takeoverMinutes, dailyReplyLimit: settings.dailyReplyLimit,
-            consentRequestText: settings.consentRequestText, aiDisclosureText: settings.aiDisclosureText))
+            consentRequestText: settings.consentRequestText, aiDisclosureText: settings.aiDisclosureText,
+            autoReplyMode: settings.autoReplyMode, replyLength: settings.replyLength,
+            learnFromChats: settings.learnFromChats))
         return try JSONDecoderBox.decode(try await apiClient.send("PUT", "v1/automation", body: body))
+    }
+}
+
+extension RemoteMessagingBackend {
+    private struct DeviceBody: Encodable { let token: String; let environment: String; let appVersion: String? }
+    private struct DeviceResponse: Decodable { let registered: Bool }
+    private struct PushTestResponse: Decodable {
+        struct Result: Decodable { let ok: Bool; let status: Int; let reason: String? }
+        let results: [Result]
+    }
+    private struct MemoriesResponse: Decodable { let memories: [FriendMemory] }
+    private struct MemoryBody: Encodable { let content: String; let sensitivity: FriendMemory.Sensitivity }
+    private struct MemoryPatch: Encodable {
+        let content: String
+        let sensitivity: FriendMemory.Sensitivity
+        let approved: Bool
+    }
+
+    func registerDevice(token: String, environment: String) async throws {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let _: DeviceResponse = try await apiClient.post(
+            "v1/devices", body: DeviceBody(token: token, environment: environment, appVersion: version))
+    }
+
+    func sendTestPush() async throws -> String {
+        let response: PushTestResponse = try await apiClient.post("v1/devices/test", body: EmptyBody())
+        let delivered = response.results.filter(\.ok).count
+        if delivered > 0 { return "Sent — check your notifications." }
+        let reasons = response.results.compactMap(\.reason).joined(separator: ", ")
+        return "Apple refused it (\(reasons.isEmpty ? "unknown reason" : reasons))."
+    }
+
+    func loadNotificationPreferences() async throws -> NotificationPreferences? {
+        let server: ServerNotificationPreferences = try await apiClient.get("v1/notifications/preferences")
+        return server.local
+    }
+
+    func saveNotificationPreferences(_ preferences: NotificationPreferences) async throws {
+        let body = try APIClient.encoder.encode(ServerNotificationPreferences(preferences))
+        _ = try await apiClient.send("PUT", "v1/notifications/preferences", body: body)
+    }
+
+    func loadMemories(for friend: Friend) async throws -> [FriendMemory] {
+        let response: MemoriesResponse = try await apiClient.get("v1/friends/\(friend.id.uuidString.lowercased())/memories")
+        return response.memories
+    }
+
+    func addMemory(_ content: String, sensitive: Bool, for friend: Friend) async throws -> FriendMemory {
+        try await apiClient.post("v1/friends/\(friend.id.uuidString.lowercased())/memories",
+                                 body: MemoryBody(content: content, sensitivity: sensitive ? .sensitive : .normal))
+    }
+
+    func updateMemory(_ memory: FriendMemory) async throws -> FriendMemory {
+        let body = try APIClient.encoder.encode(MemoryPatch(content: memory.content, sensitivity: memory.sensitivity,
+                                                            approved: memory.approved))
+        return try JSONDecoderBox.decode(try await apiClient.send("PATCH", "v1/memories/\(memory.id.uuidString.lowercased())", body: body))
+    }
+
+    func deleteMemory(_ memory: FriendMemory) async throws {
+        _ = try await apiClient.send("DELETE", "v1/memories/\(memory.id.uuidString.lowercased())")
     }
 }
 
@@ -305,6 +431,7 @@ final class MockMessagingBackend: MessagingBackend {
     private var paused = false
     private var reviews: [ReviewItem] = []
     private var styles: [UUID: FriendStyle] = [:]
+    private var memories: [UUID: [FriendMemory]] = [:]
 
     init(now: Date = .now) {
         let sample = MockMessagingBackend.sample(now: now)
@@ -346,7 +473,10 @@ final class MockMessagingBackend: MessagingBackend {
                                       reason: risky ? "needs_you" : "review_first",
                                       reasonText: risky ? "needs an answer only you can give" : "is set to check every reply with you first",
                                       draft: draft, inboundText: text, createdAt: .now,
-                                      windowExpiresAt: Date.now.addingTimeInterval(24 * 3600)), at: 0)
+                                      windowExpiresAt: Date.now.addingTimeInterval(24 * 3600),
+                                      suggestions: [.init(text: draft, kind: .text),
+                                                    .init(text: "yesss let's do it", kind: .text),
+                                                    .init(text: "can't this time 😭", kind: .text)]), at: 0)
             activity.insert(ActivityItem(id: UUID(), category: "needs_attention", title: "\(current.firstName) needs your reply",
                                          body: "ECHO drafted a reply and is waiting for you.", createdAt: .now), at: 0)
         } else {
@@ -377,8 +507,11 @@ final class MockMessagingBackend: MessagingBackend {
             eligibility: .checkedAtDispatch,
             status: .scheduled
         )
-        jobs.append(job)
-        return job
+        var saved = job
+        saved.messageText = draft.messageText
+        if saved.instruction.isEmpty, draft.messageText != nil { saved.instruction = "Send the exact message I wrote." }
+        jobs.append(saved)
+        return saved
     }
 
     func pause(_ job: ScheduledJob) async throws -> ScheduledJob {
@@ -468,16 +601,107 @@ final class MockMessagingBackend: MessagingBackend {
 
     func disconnectInstagram(deleteMessages: Bool) async throws {}
 
+    // MARK: Phase 6 (offline imitation)
+
+    func registerDevice(token: String, environment: String) async throws {}
+
+    func sendTestPush() async throws -> String {
+        throw APIError.server(status: 409, message: "Push notifications need the backend (Settings → AI & backend).")
+    }
+
+    func loadNotificationPreferences() async throws -> NotificationPreferences? { nil }
+
+    func saveNotificationPreferences(_ preferences: NotificationPreferences) async throws {}
+
+    func loadMemories(for friend: Friend) async throws -> [FriendMemory] { memories[friend.id] ?? [] }
+
+    func addMemory(_ content: String, sensitive: Bool, for friend: Friend) async throws -> FriendMemory {
+        let memory = FriendMemory(id: UUID(), content: content, source: "user_stated",
+                                  sensitivity: sensitive ? .sensitive : .normal, approved: true,
+                                  expiresAt: sensitive ? .now.addingTimeInterval(30 * 86_400) : nil, createdAt: .now)
+        memories[friend.id, default: []].insert(memory, at: 0)
+        return memory
+    }
+
+    func updateMemory(_ memory: FriendMemory) async throws -> FriendMemory {
+        for (friendID, list) in memories {
+            if let index = list.firstIndex(where: { $0.id == memory.id }) { memories[friendID]?[index] = memory }
+        }
+        return memory
+    }
+
+    func deleteMemory(_ memory: FriendMemory) async throws {
+        for friendID in memories.keys { memories[friendID]?.removeAll { $0.id == memory.id } }
+    }
+
     // MARK: Automatic replies (offline imitation)
 
     func loadReviews() async throws -> [ReviewItem] { reviews }
 
-    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?) async throws {
+    func resolveReview(_ item: ReviewItem, action: ReviewItem.Action, text: String?,
+                       kind: ReviewItem.Suggestion.Kind) async throws {
         reviews.removeAll { $0.id == item.id }
-        if action == .send, let body = text ?? item.draft {
+        guard action == .send else { return }
+        if kind == .reaction {
+            append(InstagramMessage(sender: .echoAuto, text: "❤️ reacted", sentAt: .now), to: item.friendId)
+        } else if let body = text ?? item.draft {
             append(InstagramMessage(sender: .echoAuto, text: body, sentAt: .now), to: item.friendId)
         }
     }
+
+    func moreSuggestions(for item: ReviewItem) async throws -> [ReviewItem.Suggestion] {
+        let fresh: [ReviewItem.Suggestion] = [
+            .init(text: "haha wait tell me more", kind: .text),
+            .init(text: "omg yes 😭", kind: .text),
+            .init(text: "❤️", kind: .reaction),
+        ]
+        var merged = fresh
+        for old in item.options where !merged.contains(old) { merged.append(old) }
+        let result = Array(merged.prefix(6))
+        if let index = reviews.firstIndex(where: { $0.id == item.id }) { reviews[index].suggestions = result }
+        return result
+    }
+
+    func learnStyleNow(for friend: Friend) async throws -> FriendStyle {
+        var style = styles[friend.id] ?? FriendStyle()
+        style.learned = LearnedStyle(tone: "playful", formality: 1, emojiLevel: 3, typicalLength: "short",
+                                     favouriteEmoji: ["😭", "💀"], phrases: ["bro", "ngl"], humor: "teasing",
+                                     language: "en", notes: "Sample learned from the demo chat")
+        style.learnedAt = .now
+        style.learnedMessageCount = 12
+        styles[friend.id] = style
+        return style
+    }
+
+    func forgetLearnedStyle(for friend: Friend) async throws {
+        styles[friend.id]?.learned = nil
+        styles[friend.id]?.learnedAt = nil
+        styles[friend.id]?.learnedMessageCount = 0
+    }
+
+    func messageIdeas(for friend: Friend, occasion: String?, count: Int) async throws -> [MessageIdea] {
+        let bank: [MessageIdea]
+        switch friend.style {
+        case .partner:
+            bank = [.init(text: "good morning babe ❤️", vibe: "sweet"), .init(text: "miss you already 🥺", vibe: "sweet"),
+                    .init(text: "thinking of u, hope today's kind to you", vibe: "caring")]
+        case .closeFriend:
+            bank = [.init(text: "bro did u survive yesterday 💀", vibe: "funny"),
+                    .init(text: "we're overdue for a hangout fr", vibe: "check-in"),
+                    .init(text: "random but ur the goat", vibe: "hype")]
+        case .family:
+            bank = [.init(text: "hi! how are you doing today?", vibe: "check-in"),
+                    .init(text: "thinking of you ❤️ eat well ok", vibe: "caring")]
+        default:
+            bank = [.init(text: "hey! how's it going?", vibe: "check-in"),
+                    .init(text: "hope your week is going well!", vibe: "friendly")]
+        }
+        return Array(bank.prefix(count))
+    }
+
+    func uploadContext(_ context: UserContextUpload) async throws {}
+
+    func clearContext() async throws {}
 
     func takeOver(_ friend: Friend) async throws -> Friend {
         try setFriend(friend.id) { $0.manualOverrideUntil = .now.addingTimeInterval(60 * 60) }

@@ -38,28 +38,17 @@ struct SettingsView: View {
                     // MARK: Automatic replies (Phase 5)
                     AutoReplySettingsSection(store: app.messagingStore)
 
+                    // MARK: Location + calendar context
+                    ContextSettingsSection(store: app.messagingStore)
+
                     // MARK: Instagram
                     InstagramSettingsSection(app: app)
 
                     // MARK: AI / backend
                     BackendSettingsSection(app: app)
 
-                    // MARK: Notifications
-                    Section {
-                        Toggle("Message sent", isOn: $app.settings.notifications.messageSent)
-                        Toggle("Scheduled message blocked", isOn: $app.settings.notifications.jobBlocked)
-                        Toggle("Delivery failed", isOn: $app.settings.notifications.deliveryFailed)
-                        Toggle("Needs your attention", isOn: $app.settings.notifications.needsAttention)
-                        Toggle("Automation status changes", isOn: $app.settings.notifications.automationChanged)
-                        Toggle("Instagram connection errors", isOn: $app.settings.notifications.connectionError)
-                        Toggle("Upcoming schedule reminders", isOn: $app.settings.notifications.scheduleReminder)
-                    } header: {
-                        Text("Notifications")
-                    } footer: {
-                        Text("Push notifications arrive in Phase 6 via Apple Push Notification service.")
-                    }
-                    .tint(EchoColor.neonPurple)
-                    .listRowBackground(EchoColor.surface.opacity(0.7))
+                    // MARK: Notifications + quiet hours (Phase 6)
+                    NotificationSettingsSection(app: app)
 
                     // MARK: Privacy
                     Section {
@@ -76,7 +65,7 @@ struct SettingsView: View {
                     } header: {
                         Text("Privacy")
                     } footer: {
-                        Text("ECHO keeps only the recent messages it needs for context. Account disconnection and server-side deletion arrive with the backend.")
+                        Text("ECHO keeps only the recent messages it needs for context. Disconnecting Instagram (above) can also delete everything ECHO stored on your Mac.")
                     }
                     .listRowBackground(EchoColor.surface.opacity(0.7))
 

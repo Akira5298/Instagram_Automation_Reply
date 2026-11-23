@@ -1,4 +1,4 @@
-"""Real delivery through the Instagram API with Instagram Login."""
+"""Real delivery through Meta's Instagram API (text messages and ❤️ reactions)."""
 
 from __future__ import annotations
 
@@ -41,6 +41,17 @@ class InstagramMessagingProvider:
     async def send_text(
         self, *, account_ig_id: str, recipient_igsid: str, text: str, idempotency_key: str
     ) -> SendResult:
+        message_id = await self._paced(account_ig_id, lambda token: self.service.client.send_text(
+            token, account_ig_id, recipient_igsid, text))
+        return SendResult(message_id)
+
+    async def send_reaction(
+        self, *, account_ig_id: str, recipient_igsid: str, message_id: str, idempotency_key: str
+    ) -> None:
+        await self._paced(account_ig_id, lambda token: self.service.client.send_reaction(
+            token, account_ig_id, recipient_igsid, message_id))
+
+    async def _paced(self, account_ig_id: str, call):
         async with self.pool.connection() as conn:
             token = await self.service.token_for(conn, account_ig_id)
         if token is None:
@@ -51,7 +62,7 @@ class InstagramMessagingProvider:
             if wait > 0:
                 await asyncio.sleep(wait)
             try:
-                message_id = await self.service.client.send_text(token, account_ig_id, recipient_igsid, text)
+                return await call(token)
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 raise TransientSendError(f"couldn't reach Instagram: {exc}") from exc
             except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError) as exc:
@@ -70,4 +81,3 @@ class InstagramMessagingProvider:
                 raise PermanentSendError(str(exc)) from exc
             finally:
                 self._last_sent[account_ig_id] = time.monotonic()
-        return SendResult(message_id)

@@ -48,6 +48,32 @@ def api_token(s: Settings) -> tuple[str, str]:
     return OK, "set"
 
 
+def env_file() -> tuple[str, str]:
+    import stat
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / ".env"
+    if not path.exists():
+        return WARN, "backend/.env not found (settings come from the environment)"
+    mode = path.stat().st_mode
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        return FAIL, f"backend/.env is readable by other users ({oct(mode & 0o777)}). Run: chmod 600 backend/.env"
+    return OK, "only you can read backend/.env"
+
+
+def push(s: Settings) -> tuple[str, str]:
+    from app.services.push import PushNotConfigured, apns_configured, load_signer
+
+    if not apns_configured(s):
+        return WARN, "not set up (optional) — see docs/TESTFLIGHT.md §3 for APNS_* settings"
+    try:
+        signer = load_signer(s)
+        signer.token()
+    except (PushNotConfigured, ValueError) as exc:
+        return FAIL, f"APNs key problem: {exc}"
+    return OK, f"APNs key {s.apns_key_id} loads and signs; topic {s.apns_bundle_id}"
+
+
 def database(s: Settings) -> tuple[str, str]:
     import psycopg
 
@@ -140,11 +166,13 @@ def main() -> None:
     print("ECHO doctor\n")
     check("Python", python_version)
     check("API token", lambda: api_token(s))
+    check("Secrets file", env_file)
     check("Database", lambda: database(s))
     check("Claude API", lambda: claude(s))
-    check("Cloudflare Tunnel", lambda: tunnel(s))
+    check("Public tunnel", lambda: tunnel(s))
     check("Webhook verification", lambda: webhook_handshake(s))
     check("Instagram settings", lambda: instagram(s))
+    check("Push notifications", lambda: push(s))
 
     base = public_base_url(s)
     if base:

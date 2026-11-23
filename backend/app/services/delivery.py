@@ -104,3 +104,48 @@ async def deliver(
         await messaging_repo.record_outbound(conn, user_id=to.user_id, friend_id=to.friend_id, text=text,
                                              mid=result.message_id, sent_by=sent_by, at=clock())
     return Delivered(result.message_id, outbound["id"])
+
+
+REACTION_LABEL = "❤️"
+
+
+async def deliver_reaction(
+    pool: AsyncConnectionPool,
+    messaging: MessagingProvider,
+    to: Recipient,
+    inbound_mid: str,
+    *,
+    idempotency_key: str,
+    clock: Callable[[], datetime],
+    sent_by: str = "echo_auto",
+) -> Delivered:
+    """A ❤️ reaction on the friend's message. Same ledger guarantees as `deliver`,
+    no disclosure (a reaction carries no AI-written words). Instagram returns no
+    message id for reactions, so the thread records a synthetic one."""
+    async with pool.connection() as conn:
+        outbound = await jobs_repo.reserve_outbound(
+            conn, user_id=to.user_id, friend_id=to.friend_id, idempotency_key=idempotency_key,
+            content=REACTION_LABEL, job_run_id=None, reply_to_inbound_id=inbound_mid,
+        )
+        if outbound["status"] == "sent":
+            return Delivered(outbound["ig_message_id"] or "", outbound["id"], already_sent=True)
+        if outbound["status"] == "unknown":
+            raise UnknownOutcome("an earlier attempt may have been delivered")
+        await conn.execute("update outbound_messages set status = 'sending' where id = %s", (outbound["id"],))
+    try:
+        await messaging.send_reaction(account_ig_id=to.ig_user_id, recipient_igsid=to.igsid,
+                                      message_id=inbound_mid, idempotency_key=idempotency_key)
+    except (TransientSendError, PermanentSendError) as exc:
+        async with pool.connection() as conn:
+            await jobs_repo.finish_outbound(conn, outbound["id"], status="failed", error=str(exc)[:300])
+        raise
+    except UnknownOutcome as exc:
+        async with pool.connection() as conn:
+            await jobs_repo.finish_outbound(conn, outbound["id"], status="unknown", error=str(exc)[:300])
+        raise
+    mid = f"reaction:{inbound_mid}"
+    async with pool.connection() as conn:
+        await jobs_repo.finish_outbound(conn, outbound["id"], status="sent", ig_message_id=mid)
+        await messaging_repo.record_outbound(conn, user_id=to.user_id, friend_id=to.friend_id,
+                                             text=f"{REACTION_LABEL} reacted", mid=mid, sent_by=sent_by, at=clock())
+    return Delivered(mid, outbound["id"])

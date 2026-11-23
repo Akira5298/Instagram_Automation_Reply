@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 
-from app.ai.provider import AssistantTurn, ComposedMessage, ReplyDraft, SummaryResult
+from app.ai.provider import AssistantTurn, ComposedMessage, LearnedStyle, MessageIdea, ReplyDraft, SummaryResult
 from app.domain.safety import keyword_flags
 
 _SLANG = {"lol", "lmao", "ngl", "tbh", "idk", "omg", "bruh", "fr", "btw", "rn"}
@@ -82,8 +82,14 @@ class MockAIProvider:
         merged = f"{previous_summary}\n{bullets}" if previous_summary else bullets
         return SummaryResult(text=merged.strip()[-2000:])
 
-    async def draft_reply(self, context_block: str) -> ReplyDraft:
-        return await _mock_draft_reply(context_block)
+    async def draft_reply(self, context_block: str, images: list | None = None) -> ReplyDraft:
+        return await _mock_draft_reply(context_block, images)
+
+    async def suggest_messages(self, context_block: str, occasion: str | None, count: int) -> list[MessageIdea]:
+        return await _mock_suggestions(context_block, occasion, count)
+
+    async def learn_style(self, transcript_block: str) -> LearnedStyle:
+        return await _mock_learn_style(transcript_block)
 
     async def compose_message(self, context_block: str, instruction: str) -> ComposedMessage:
         style = "close_friend"
@@ -110,22 +116,71 @@ def _unanswered(context_block: str) -> list[str]:
             for line in context_block.splitlines() if "Friend [unanswered]:" in line]
 
 
-async def _mock_draft_reply(context_block: str) -> ReplyDraft:
+async def _mock_draft_reply(context_block: str, images: list | None = None) -> ReplyDraft:
     pending = _unanswered(context_block)
     last = pending[-1] if pending else ""
+    alts = ["[mock] hahaha", "[mock] wait fr? 😮"]
     if last and _NO_REPLY.match(last):
         return ReplyDraft(action="no_reply", text="", language="en", note="nothing to answer")
-    if last.startswith("[") and last.endswith("]"):
-        return ReplyDraft(action="needs_user", text="[mock] nice! what's that?", language="en",
-                          note="attachment ECHO can't see")
+    if images:
+        return ReplyDraft(action="reply", text="[mock] omg look at that 😍", language="en", alternatives=alts)
+    if last.startswith("[Reel"):
+        return ReplyDraft(action="reply", text="[mock] LMAOOO 😭 this is so you", language="en",
+                          alternatives=["[mock] 😂😂😂", "[mock] nahh i'm sending this to everyone"])
+    if last.startswith("[Post"):
+        return ReplyDraft(action="react", text="", language="en", note="a heart says it all")
+    if last.startswith("[voice message]"):
+        return ReplyDraft(action="needs_user", text="[mock] will listen in a bit!", language="en",
+                          alternatives=["[mock] can't listen rn, text me?"], note="can't hear audio")
     flags = sorted(keyword_flags(*pending))
     if "free" in last.lower() or "when" in last.lower():
-        return ReplyDraft(action="needs_user", text="[mock] let me check and get back to you [time]",
-                          language="en", flags=flags or ["unknown_info"], note="asks about your plans")
+        busy = "busy" in context_block.lower() and "<user_context>" in context_block
+        text = "[mock] can't, busy till later 😭" if busy else "[mock] maybe! let me check"
+        return ReplyDraft(action="needs_user", text=text, language="en", flags=flags or ["unknown_info"],
+                          alternatives=["[mock] yes i'm free!", "[mock] can't sorry 😭", "[mock] what time?"],
+                          note="asks about your plans")
     style = re.search(r"preset=(\w+)", context_block)
     prefix = "Hello! " if style and style.group(1) == "professional" else "haha "
-    return ReplyDraft(action="reply", text=f"[mock] {prefix}{last.lower()[:60] or 'hey'} 😄", language="en",
-                      flags=flags, note="mock flag" if flags else "")
+    length = re.search(r"<reply_length>\s*(\w+)", context_block)
+    body = last.lower()[:60] or "hey"
+    if length and length.group(1) == "short":
+        body = body.split()[0] if body.split() else "hey"
+    return ReplyDraft(action="reply", text=f"[mock] {prefix}{body} 😄", language="en",
+                      flags=flags, note="mock flag" if flags else "", alternatives=alts)
+
+
+async def _mock_suggestions(context_block: str, occasion: str | None, count: int) -> list[MessageIdea]:
+    m = re.search(r"preset=(\w+)", context_block)
+    preset = m.group(1) if m else "custom"
+    about = f" ({occasion})" if occasion else ""
+    bank = {
+        "partner": [("good morning babe ❤️", "sweet"), ("miss you already 🥺", "sweet"),
+                    ("thinking of u, hope today's kind to you", "caring"), ("u + me + food later? 😋", "playful")],
+        "close_friend": [("bro did u survive yesterday 💀", "funny"), ("i saw a cat that looks exactly like u", "funny"),
+                         ("we're overdue for a hangout fr", "check-in"), ("random but ur the goat", "hype")],
+        "family": [("hi! how are you doing today?", "check-in"), ("thinking of you ❤️ eat well ok", "caring"),
+                   ("call me when you're free?", "check-in"), ("miss you guys!", "warm")],
+    }.get(preset, [("hey! how's it going?", "check-in"), ("hope your week is going well!", "friendly"),
+                   ("long time no talk!", "casual"), ("thinking of you, hope all's good", "warm")])
+    return [MessageIdea(f"[mock] {text}{about}", vibe) for text, vibe in bank][:count]
+
+
+async def _mock_learn_style(transcript: str) -> LearnedStyle:
+    mine = [line[3:].strip() for line in transcript.splitlines() if line.startswith("Me:")]
+    emoji = [ch for line in mine for ch in line if ord(ch) > 0x2600]
+    avg = sum(len(m) for m in mine) / max(1, len(mine))
+    style = {
+        "tone": "playful" if any(w in " ".join(mine).lower() for w in ("haha", "lol", "lmao")) else "warm",
+        "formality": 1, "emoji_level": min(4, len(emoji) // max(1, len(mine)) + (1 if emoji else 0)),
+        "typical_length": "very short" if avg < 15 else "short" if avg < 60 else "medium",
+        "favourite_emoji": sorted(set(emoji))[:5],
+        "phrases": sorted({w for m in mine for w in m.lower().split() if w in _SLANG})[:8],
+        "humor": "teasing" if "haha" in " ".join(mine).lower() else "",
+        "language": "en", "notes": f"learned from {len(mine)} messages",
+    }
+    updates = [{"op": "set", "category": "sentence_style", "key": "sentence_style.length",
+                "value": f"usually {style['typical_length']} messages", "kind": "observation"}]
+    return LearnedStyle(friend_style=style, profile_updates=updates)
 
 
 def _mock_schedule(match: re.Match, context_block: str, user_text: str) -> dict:
