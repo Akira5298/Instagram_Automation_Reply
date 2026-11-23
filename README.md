@@ -91,7 +91,7 @@ FastAPI backend ──────── Anthropic Claude API
 
 The ECHO pre-flight checks show the local PostgreSQL database, Claude API, public HTTPS tunnel, Meta webhook verification, and Instagram messaging provider in the development environment.
 
-![ECHO backend diagnostic output](screenshots/backend.png)
+<img src="screenshots/backend.png" alt="ECHO backend diagnostic output" width="650">
 
 > This is a development-status screenshot, not a production uptime or security audit. Redact account identifiers, URLs, tokens, and other private configuration before making this image public.
 
