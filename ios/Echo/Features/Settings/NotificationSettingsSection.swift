@@ -10,6 +10,10 @@ struct NotificationSettingsSection: View {
     @State private var testResult: String?
     @State private var testing = false
     @State private var loadedFromServer = false
+    /// Which connection the preferences were loaded for (load once per backend).
+    @State private var loadedForRemote: Bool?
+    /// What the server has, so loading doesn't trigger an identical save.
+    @State private var syncedPrefs: NotificationPreferences?
 
     private var prefs: Binding<NotificationPreferences> { $app.settings.notifications }
 
@@ -49,18 +53,26 @@ struct NotificationSettingsSection: View {
         .listRowBackground(EchoColor.surface.opacity(0.7))
         .task(id: app.messagingStore.isRemote) {
             await push.refreshStatus()
-            if let server = await app.messagingStore.loadNotificationPreferences() {
+            let remote = app.messagingStore.isRemote
+            guard loadedForRemote != remote else { return }    // already loaded for this backend
+            if let server = await app.messagingStore.loadNotificationPreferences(),
+               server != app.settings.notifications {
+                // Only write real changes: AppSettings is observed app-wide and saved to disk.
+                syncedPrefs = server
                 app.settings.notifications = server
+            } else {
+                syncedPrefs = app.settings.notifications
             }
+            loadedForRemote = remote
             loadedFromServer = true
         }
-        .onChange(of: app.settings.notifications) { _, newValue in
-            guard loadedFromServer, app.messagingStore.isRemote else { return }
-            Task {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard newValue == app.settings.notifications else { return }   // debounce
-                await app.messagingStore.saveNotificationPreferences(newValue)
-            }
+        // Debounced save; `.task(id:)` cancels the previous wait on each change.
+        .task(id: app.settings.notifications) {
+            let pending = app.settings.notifications
+            guard loadedFromServer, app.messagingStore.isRemote, pending != syncedPrefs else { return }
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+            await app.messagingStore.saveNotificationPreferences(pending)
+            syncedPrefs = pending
         }
     }
 

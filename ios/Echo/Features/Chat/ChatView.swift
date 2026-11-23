@@ -103,6 +103,10 @@ struct ChatView: View {
             }
             .navigationTitle("ECHO")
             .navigationBarTitleDisplayMode(.inline)
+            // TabView keeps this screen alive on other tabs; a text field that stays
+            // focused off-screen makes UIKit send keyboard notifications for a
+            // keyboard that isn't shown.
+            .onDisappear { inputFocused = false }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if viewModel.isRemote {
@@ -116,10 +120,12 @@ struct ChatView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: EchoSpacing.sm) {
                         MemoryIndicator(count: viewModel.memoryCount, lastLearnedAt: viewModel.lastLearnedAt) {
+                            inputFocused = false          // keyboard away before the sheet comes up
                             showingMemory = true
                         }
                         Menu {
                             Button("Clear conversation", systemImage: "trash", role: .destructive) {
+                                inputFocused = false
                                 confirmingClear = true
                             }
                         } label: {

@@ -18,6 +18,14 @@ final class MessagingStore {
 
     private let backend: MessagingBackend
 
+    // Bookkeeping, not UI state: kept out of observation so touching it never re-renders views.
+    /// The chat that's open on screen; live reloads keep it marked as read.
+    @ObservationIgnored private var openConversationID: UUID?
+    /// The refresh in flight, so overlapping callers share it instead of racing.
+    @ObservationIgnored private var refreshInFlight: Task<Void, Never>?
+    /// Only the newest live-update loop keeps running (see runLiveUpdates).
+    @ObservationIgnored private var liveGeneration = 0
+
     init(backend: MessagingBackend) {
         self.backend = backend
         if let mock = backend as? MockMessagingBackend {
@@ -41,22 +49,71 @@ final class MessagingStore {
 
     // MARK: Loading
 
+    /// Full reload. Concurrent callers (launch, pull-to-refresh, returning from
+    /// the background, a tapped notification) share one request instead of
+    /// racing each other, and the results land in a single update.
     func refresh() async {
+        if let running = refreshInFlight {
+            await running.value
+            return
+        }
+        let task = Task { await self.performRefresh() }
+        refreshInFlight = task
+        await task.value
+        refreshInFlight = nil
+    }
+
+    private func performRefresh() async {
         isLoading = true
         defer { isLoading = false }
-        await perform {
-            conversations = try await backend.loadConversations()
-            jobs = try await backend.loadJobs()
-            activity = try await backend.loadActivity()
+        // Fetch everything first, then apply it together, so views get one
+        // consistent update instead of one per request.
+        let core: (conversations: [ConversationSummary], jobs: [ScheduledJob], activity: [ActivityItem])?
+        do {
+            let conversations = try await backend.loadConversations()
+            let jobs = try await backend.loadJobs()
+            let activity = try await backend.loadActivity()
+            core = (conversations, jobs, activity)
+        } catch is CancellationError {
+            return
+        } catch {
+            core = nil
+            errorMessage = error.localizedDescription
         }
-        reviews = (try? await backend.loadReviews()) ?? reviews
-        instagramStatus = try? await backend.loadInstagramStatus()
+        let loadedReviews = try? await backend.loadReviews()
+        let loadedStatus = try? await backend.loadInstagramStatus()
+
+        if let core {
+            apply(conversations: core.conversations)
+            set(\.jobs, core.jobs)
+            set(\.activity, core.activity)
+        }
+        if let loadedReviews { set(\.reviews, loadedReviews) }
+        if let loadedStatus { set(\.instagramStatus, loadedStatus) }
+    }
+
+    /// Assigning an @Observable property always notifies its observers, even
+    /// with an identical value. Live updates and refreshes mostly bring back
+    /// the same data, so only assign real changes.
+    private func set<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<MessagingStore, Value>, _ value: Value) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+    }
+
+    private func apply(conversations loaded: [ConversationSummary]) {
+        var loaded = loaded
+        if let open = openConversationID, let index = loaded.firstIndex(where: { $0.id == open }) {
+            loaded[index].unreadCount = 0     // you're looking at it
+        }
+        set(\.conversations, loaded)
     }
 
     // MARK: Instagram connection
 
     func refreshInstagramStatus() async {
-        await perform { instagramStatus = try await backend.loadInstagramStatus() }
+        await perform {
+            let status = try await backend.loadInstagramStatus()
+            set(\.instagramStatus, status)
+        }
     }
 
     func instagramAuthorizeURL() async -> URL? {
@@ -72,7 +129,8 @@ final class MessagingStore {
         var count: Int?
         await perform {
             count = try await backend.syncInstagram()
-            conversations = try await backend.loadConversations()
+            let loaded = try await backend.loadConversations()
+            apply(conversations: loaded)
         }
         return count
     }
@@ -84,8 +142,10 @@ final class MessagingStore {
 
     func refreshJobs() async {
         await perform {
-            jobs = try await backend.loadJobs()
-            activity = try await backend.loadActivity()
+            let loadedJobs = try await backend.loadJobs()
+            let loadedActivity = try await backend.loadActivity()
+            set(\.jobs, loadedJobs)
+            set(\.activity, loadedActivity)
         }
     }
 
@@ -119,8 +179,20 @@ final class MessagingStore {
     }
 
     func markRead(_ conversationID: UUID) {
-        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }),
+              conversations[index].unreadCount != 0 else { return }   // no-op writes still re-render
         conversations[index].unreadCount = 0
+    }
+
+    /// The conversation screen calls these so live reloads don't flip its
+    /// unread badge back on while you're reading it.
+    func conversationOpened(_ conversationID: UUID) {
+        openConversationID = conversationID
+        markRead(conversationID)
+    }
+
+    func conversationClosed(_ conversationID: UUID) {
+        if openConversationID == conversationID { openConversationID = nil }
     }
 
     @discardableResult
@@ -140,9 +212,12 @@ final class MessagingStore {
         guard let conversation = conversation(id: conversationID) else { return }
         await perform {
             try await backend.simulateInbound(text, from: conversation.friend)
-            conversations = try await backend.loadConversations()
-            reviews = try await backend.loadReviews()
-            activity = try await backend.loadActivity()
+            let loadedConversations = try await backend.loadConversations()
+            let loadedReviews = try await backend.loadReviews()
+            let loadedActivity = try await backend.loadActivity()
+            apply(conversations: loadedConversations)
+            set(\.reviews, loadedReviews)
+            set(\.activity, loadedActivity)
         }
     }
 
@@ -210,11 +285,16 @@ final class MessagingStore {
     /// (a new DM, an automatic reply, a held draft…). Returns when cancelled.
     func runLiveUpdates() async {
         guard isRemote else { return }
+        // Exactly one loop: a newer call (the view's task restarting) retires
+        // any older loop that hasn't noticed its cancellation yet.
+        liveGeneration &+= 1
+        let generation = liveGeneration
         var cursor: String?
         var failures = 0
-        while !Task.isCancelled {
+        while !Task.isCancelled, generation == liveGeneration {
             do {
                 let update = try await backend.waitForUpdates(since: cursor)
+                guard !Task.isCancelled, generation == liveGeneration else { return }
                 failures = 0
                 if update.changed && cursor != nil { await reloadQuietly() }
                 cursor = update.cursor
@@ -227,16 +307,23 @@ final class MessagingStore {
     }
 
     /// Like refresh(), but never shows an error banner (it runs in the background).
+    /// Fetches first, then applies only what changed, in one go.
     private func reloadQuietly() async {
-        if let loaded = try? await backend.loadConversations() { conversations = loaded }
-        if let loaded = try? await backend.loadReviews() { reviews = loaded }
-        if let loaded = try? await backend.loadActivity() { activity = loaded }
+        let loadedConversations = try? await backend.loadConversations()
+        let loadedReviews = try? await backend.loadReviews()
+        let loadedActivity = try? await backend.loadActivity()
+        if let loadedConversations { apply(conversations: loadedConversations) }
+        if let loadedReviews { set(\.reviews, loadedReviews) }
+        if let loadedActivity { set(\.activity, loadedActivity) }
     }
 
     // MARK: Automatic replies
 
     func refreshReviews() async {
-        await perform { reviews = try await backend.loadReviews() }
+        await perform {
+            let loaded = try await backend.loadReviews()
+            set(\.reviews, loaded)
+        }
     }
 
     /// Send (optionally edited), dismiss, or mark as answered in Instagram.
@@ -248,7 +335,10 @@ final class MessagingStore {
             reviews.removeAll { $0.id == item.id }
         }
         if ok, action == .send {
-            await perform { conversations = try await backend.loadConversations() }
+            await perform {
+                let loaded = try await backend.loadConversations()
+                apply(conversations: loaded)
+            }
             if isRemote { await refreshJobs() }
         }
         return ok
@@ -275,7 +365,8 @@ final class MessagingStore {
         guard let friend = conversation(id: conversationID)?.friend else { return false }
         return await perform {
             replaceFriend(try await backend.requestConsent(friend))
-            conversations = try await backend.loadConversations()
+            let loaded = try await backend.loadConversations()
+            apply(conversations: loaded)
         }
     }
 
@@ -398,7 +489,8 @@ final class MessagingStore {
     func markActivityRead() async {
         await perform {
             try await backend.markActivityRead()
-            activity = try await backend.loadActivity()
+            let loaded = try await backend.loadActivity()
+            set(\.activity, loaded)
         }
     }
 

@@ -3,6 +3,8 @@ import SwiftUI
 struct RootTabView: View {
     @Bindable var app: AppModel
     @Environment(\.scenePhase) private var scenePhase
+    /// Set when the scene really went to the background (not just inactive).
+    @State private var wasInBackground = false
 
     var body: some View {
         TabView(selection: $app.selectedTab) {
@@ -31,23 +33,31 @@ struct RootTabView: View {
         .tint(EchoColor.cyan)
         .onChange(of: app.selectedTab) { Haptics.select() }
         .task { await app.refreshAll() }
-        // Live updates while the app is open; restarts when the backend changes.
-        .task(id: LiveKey(active: scenePhase == .active, store: ObjectIdentifier(app.messagingStore))) {
-            guard scenePhase == .active else { return }
-            await app.messagingStore.runLiveUpdates()
+        // One background-work task while ECHO is in the foreground: the live-update
+        // long poll, plus the optional "Your day" upload every 15 minutes. Keyed on
+        // "not in the background" rather than "active", because permission prompts,
+        // Face ID, the Instagram login sheet and Control Center only make the scene
+        // *inactive* for a moment; restarting everything for those caused a burst
+        // of duplicate reloads. It restarts when the backend changes.
+        .task(id: LiveKey(foreground: scenePhase != .background, store: ObjectIdentifier(app.messagingStore))) {
+            guard scenePhase != .background else { return }
+            let store = app.messagingStore
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await store.runLiveUpdates() }
+                group.addTask { await Self.contextLoop(store: store) }
+            }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { await app.messagingStore.refresh() } }   // catch up after background
-        }
-        // "Your day" context (only if you turned it on): on open, then every 15 minutes.
-        .task(id: LiveKey(active: scenePhase == .active, store: ObjectIdentifier(app.messagingStore))) {
-            guard scenePhase == .active else { return }
-            while !Task.isCancelled {
-                let context = ContextManager.shared
-                if context.settings.shareLocation || context.settings.shareCalendar {
-                    await context.sync(to: app.messagingStore)
-                }
-                try? await Task.sleep(for: .seconds(ContextManager.uploadInterval))
+            // Catch up only after a real trip to the background (background →
+            // inactive → active), not after every brief inactive moment.
+            switch phase {
+            case .background:
+                wasInBackground = true
+            case .active where wasInBackground:
+                wasInBackground = false
+                Task { await app.messagingStore.refresh() }
+            default:
+                break
             }
         }
         // Push (Phase 6): register the device with your server, open tapped notifications.
@@ -66,19 +76,44 @@ struct RootTabView: View {
 }
 
 extension RootTabView {
-    private func openRoute(_ route: PushRoute) {
-        switch route {
-        case .conversation(let id):
-            app.selectedTab = .messages
-            app.messagesViewModel.path = [id]
-        case .reviews:
-            app.selectedTab = .messages
-            app.messagesViewModel.path = []
-            app.messagesViewModel.showingReviews = true
-        case .activity:
-            app.selectedTab = .scheduler
+    @MainActor
+    private static func contextLoop(store: MessagingStore) async {
+        while !Task.isCancelled {
+            let context = ContextManager.shared
+            if context.settings.shareLocation || context.settings.shareCalendar {
+                await context.sync(to: store)
+            }
+            try? await Task.sleep(for: .seconds(ContextManager.uploadInterval))
         }
-        Task { await app.messagingStore.refresh() }
+    }
+
+    /// Opens a tapped notification. Navigation changes are made one at a time
+    /// and only when they change something: switching tab, popping the stack
+    /// and presenting a sheet in the same frame makes SwiftUI's navigation
+    /// update several times per frame (and can drop the sheet).
+    private func openRoute(_ route: PushRoute) {
+        let messages = app.messagesViewModel
+        Task { @MainActor in
+            switch route {
+            case .conversation(let id):
+                if messages.showingReviews {
+                    messages.showingReviews = false
+                    try? await Task.sleep(for: .milliseconds(400))   // let the sheet finish dismissing
+                }
+                if app.selectedTab != .messages { app.selectedTab = .messages }
+                if messages.path != [id] { messages.path = [id] }
+            case .reviews:
+                if app.selectedTab != .messages { app.selectedTab = .messages }
+                if !messages.path.isEmpty {
+                    messages.path = []
+                    try? await Task.sleep(for: .milliseconds(400))   // let the pop finish first
+                }
+                if !messages.showingReviews { messages.showingReviews = true }
+            case .activity:
+                if app.selectedTab != .scheduler { app.selectedTab = .scheduler }
+            }
+            await app.messagingStore.refresh()
+        }
     }
 }
 
@@ -88,7 +123,7 @@ private struct PushTokenKey: Hashable {
 }
 
 private struct LiveKey: Hashable {
-    let active: Bool
+    let foreground: Bool
     let store: ObjectIdentifier
 }
 

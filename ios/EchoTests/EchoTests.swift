@@ -1,4 +1,5 @@
 import XCTest
+import Observation
 @testable import Echo
 
 final class MockStyleAnalyzerTests: XCTestCase {
@@ -689,5 +690,59 @@ final class SmarterRepliesTests: XCTestCase {
             let data = try JSONEncoder().encode(preset)
             XCTAssertEqual(try JSONDecoder().decode(Friend.StylePreset.self, from: data), preset)
         }
+    }
+}
+
+// MARK: - Redundant UI updates (runtime-warning fixes)
+
+@MainActor
+final class StoreUpdateTests: XCTestCase {
+    /// Calls `body` and reports whether anything that read `read` was invalidated.
+    private func invalidates(_ read: @escaping () -> Void, by body: () async -> Void) async -> Bool {
+        let fired = Flag()
+        withObservationTracking(read) { fired.value = true }
+        await body()
+        return fired.value
+    }
+
+    private final class Flag: @unchecked Sendable { var value = false }
+
+    func testRefreshWithUnchangedDataDoesNotInvalidateObservers() async {
+        let store = MessagingStore.mock()
+        await store.refresh()                                   // first load may change things
+        let changed = await invalidates({ _ = store.conversations; _ = store.jobs; _ = store.reviews }) {
+            await store.refresh()                               // same data again
+        }
+        XCTAssertFalse(changed, "an identical reload must not re-render views")
+    }
+
+    func testMarkReadIsANoOpWhenAlreadyRead() async {
+        let store = MessagingStore.mock()
+        guard let conversation = store.conversations.first else { return XCTFail("no sample data") }
+        store.markRead(conversation.id)
+        let changed = await invalidates({ _ = store.conversations }) { store.markRead(conversation.id) }
+        XCTAssertFalse(changed)
+    }
+
+    func testOpenConversationStaysReadAcrossReloads() async throws {
+        let store = MessagingStore.mock()
+        guard let unread = store.conversations.first(where: { $0.unreadCount > 0 }) else {
+            throw XCTSkip("sample data has no unread conversation")
+        }
+        store.conversationOpened(unread.id)
+        await store.refresh()
+        XCTAssertEqual(store.conversation(id: unread.id)?.unreadCount, 0)
+        store.conversationClosed(unread.id)
+        await store.refresh()
+        XCTAssertEqual(store.conversation(id: unread.id)?.unreadCount, unread.unreadCount)
+    }
+
+    func testConcurrentRefreshesShareOneLoad() async {
+        let store = MessagingStore.mock()
+        async let a: Void = store.refresh()
+        async let b: Void = store.refresh()
+        _ = await (a, b)
+        XCTAssertFalse(store.isLoading)
+        XCTAssertFalse(store.conversations.isEmpty)
     }
 }

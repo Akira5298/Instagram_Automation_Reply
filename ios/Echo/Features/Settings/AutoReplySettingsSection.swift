@@ -60,19 +60,21 @@ struct AutoReplySettingsSection: View {
         }
         .tint(EchoColor.cyan)
         .listRowBackground(EchoColor.surface.opacity(0.7))
+        // Load once. Form rows are lazy, so `.task` runs again whenever this
+        // section scrolls back into view; reloading then would overwrite edits.
         .task {
+            guard settings == nil else { return }
             let loaded = await store.loadAutomationSettings()
             settings = loaded
             saved = loaded
         }
-        .onChange(of: settings) { _, newValue in
-            guard let newValue, newValue != saved else { return }
-            Task {
-                try? await Task.sleep(for: .milliseconds(600))   // debounce typing
-                guard newValue == settings else { return }
-                if let result = await store.saveAutomationSettings(newValue) {
-                    saved = result
-                }
+        // Debounced save. `.task(id:)` cancels the previous wait on every change,
+        // so typing doesn't pile up one save task per keystroke.
+        .task(id: settings) {
+            guard let pending = settings, pending != saved else { return }
+            do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
+            if let result = await store.saveAutomationSettings(pending) {
+                saved = result
             }
         }
     }

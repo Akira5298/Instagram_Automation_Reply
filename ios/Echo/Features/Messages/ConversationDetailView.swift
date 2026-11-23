@@ -10,6 +10,7 @@ struct ConversationDetailView: View {
     @State private var showingStyle = false
     @State private var showingMemories = false
     @State private var showingReviews = false
+    @FocusState private var replyFocused: Bool
 
     var body: some View {
         ZStack {
@@ -21,7 +22,20 @@ struct ConversationDetailView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { store.markRead(conversationID) }
+        // Bookkeeping only; markRead skips the write when it's already read, so
+        // pushing this screen doesn't re-render the list underneath mid-transition.
+        .onAppear { store.conversationOpened(conversationID) }
+        .onDisappear {
+            replyFocused = false
+            store.conversationClosed(conversationID)
+        }
+    }
+
+    /// Put the keyboard away before a sheet slides up, so UIKit isn't moving
+    /// the keyboard and presenting a sheet in the same animation.
+    private func present(_ flag: Binding<Bool>) {
+        replyFocused = false
+        flag.wrappedValue = true
     }
 
     @ViewBuilder
@@ -44,9 +58,9 @@ struct ConversationDetailView: View {
                             if await store.requestConsent(in: conversationID) { Haptics.success() }
                         }
                     },
-                    onEditStyle: { showingStyle = true },
-                    onEditMemories: { showingMemories = true },
-                    onOpenReviews: { showingReviews = true }
+                    onEditStyle: { present($showingStyle) },
+                    onEditMemories: { present($showingMemories) },
+                    onOpenReviews: { present($showingReviews) }
                 )
 
                 if friend.aiReplyEnabled, let outcome = conversation.lastAutoReply {
@@ -71,10 +85,12 @@ struct ConversationDetailView: View {
             .padding(EchoSpacing.md)
         }
         .defaultScrollAnchor(.bottom)
+        .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: EchoSpacing.xs) {
                 TextField("Reply yourself…", text: $reply, axis: .vertical)
                     .lineLimit(1...4)
+                    .focused($replyFocused)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(EchoColor.surfaceElevated.opacity(0.85), in: RoundedRectangle(cornerRadius: 20, style: .continuous))

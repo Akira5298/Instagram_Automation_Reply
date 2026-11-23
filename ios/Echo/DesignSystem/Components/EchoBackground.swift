@@ -9,7 +9,25 @@ struct EchoBackground: View {
     var body: some View {
         ZStack {
             EchoColor.background
+            glow
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        // Start the drift *after* the view is on screen, in its own transaction.
+        // The old `withAnimation(.repeatForever)` inside `.onAppear` ran in the same
+        // transaction as the navigation push / sheet / tab switch that made the
+        // view appear, so SwiftUI could attach the never-ending animation to that
+        // layout change too (screens sliding or drifting, repeated layout passes).
+        .task {
+            guard !reduceMotion, !drift else { return }
+            drift = true
+        }
+    }
 
+    /// The animation is scoped to the glow circles only, via `.animation(_:value:)`.
+    private var glow: some View {
+        ZStack {
             Circle()
                 .fill(EchoColor.neonPurple.opacity(0.32))
                 .frame(width: 380, height: 380)
@@ -28,15 +46,7 @@ struct EchoBackground: View {
                 .blur(radius: 100)
                 .offset(x: drift ? 70 : -50, y: drift ? 40 : -30)
         }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 16).repeatForever(autoreverses: true)) {
-                drift = true
-            }
-        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 16).repeatForever(autoreverses: true), value: drift)
     }
 }
 

@@ -8,6 +8,10 @@ struct ReviewQueueView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var edits: [UUID: String] = [:]
     @State private var busy: Set<UUID> = []
+    /// Which card's text field has the keyboard. Cleared before a card is sent
+    /// (it disappears from the list) and before the sheet closes, so the keyboard
+    /// never belongs to a view that's being removed.
+    @FocusState private var focusedCard: UUID?
 
     var body: some View {
         NavigationStack {
@@ -25,7 +29,8 @@ struct ReviewQueueView: View {
                                 busy: busy.contains(item.id),
                                 onAction: { action in resolve(item, action) },
                                 onPick: { suggestion in send(item, suggestion) },
-                                onMore: { more(item) }
+                                onMore: { more(item) },
+                                focus: $focusedCard
                             )
                         }
                         if store.reviews.isEmpty {
@@ -39,12 +44,16 @@ struct ReviewQueueView: View {
                     }
                     .padding(EchoSpacing.md)
                 }
+                .scrollDismissesKeyboard(.interactively)
             }
             .navigationTitle("Needs you")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Done") {
+                        focusedCard = nil
+                        dismiss()
+                    }
                 }
             }
             .refreshable { await store.refreshReviews() }
@@ -54,6 +63,7 @@ struct ReviewQueueView: View {
 
     /// One tap on a suggestion sends it as is (words, or a ❤️ reaction).
     private func send(_ item: ReviewItem, _ suggestion: ReviewItem.Suggestion) {
+        focusedCard = nil
         busy.insert(item.id)
         Task {
             let ok = await store.resolveReview(item, action: .send,
@@ -73,6 +83,7 @@ struct ReviewQueueView: View {
     }
 
     private func resolve(_ item: ReviewItem, _ action: ReviewItem.Action) {
+        focusedCard = nil
         busy.insert(item.id)
         let edited = edits[item.id]
         let text = action == .send && edited != nil && edited != item.draft ? edited : nil
@@ -90,12 +101,22 @@ struct ReviewQueueView: View {
 }
 
 struct ReviewCard: View {
+    @ViewBuilder
+    private func focusable(_ field: TextField<Text>) -> some View {
+        if let focus {
+            field.focused(focus, equals: item.id)
+        } else {
+            field
+        }
+    }
+
     let item: ReviewItem
     @Binding var text: String
     let busy: Bool
     let onAction: (ReviewItem.Action) -> Void
     var onPick: (ReviewItem.Suggestion) -> Void = { _ in }
     var onMore: () -> Void = {}
+    var focus: FocusState<UUID?>.Binding? = nil
 
     private var windowOpen: Bool { item.windowOpen() }
     private var canSend: Bool { !busy && (item.origin != .autoReply || windowOpen) }
@@ -167,7 +188,7 @@ struct ReviewCard: View {
                 Text("Or write your own").echoReadout()
             }
 
-            TextField("Your reply", text: $text, axis: .vertical)
+            focusable(TextField("Your reply", text: $text, axis: .vertical))
                 .lineLimit(2...6)
                 .font(EchoFont.body)
                 .padding(10)
