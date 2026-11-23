@@ -1,121 +1,173 @@
-# ECHO — AI personal messaging assistant (iOS)
+# ECHO — AI-Powered Instagram Messaging Assistant
 
-ECHO runs entirely on your Mac: **FastAPI (Python 3.12) + local PostgreSQL + Claude API + a tunnel** (Cloudflare, or ngrok's free fixed domain via `ECHO_PUBLIC_BASE_URL`) for the public https address Meta needs. There are no hosting costs; you pay only for Claude API usage.
+**A native iOS messaging assistant that connects to Instagram, learns your communication style, and helps manage conversations with Claude AI.**
 
-**Phase 7 — smarter replies.**
-- **Tap-to-send suggestions in Needs you:** every held reply comes with 2–3 options in your voice (yes / no / maybe-style), plus ❤️ React. Tap one to send it, long-press to edit, or write your own. **More options** asks for fresh ones.
-- **Reply mode** (Settings → Automatic replies): *Fully automatic*, or *Review every reply* (everything waits in Needs you with suggestions).
-- **Reply length:** Short, Medium, Long or Adaptive (mirrors the friend and how you usually write to them).
-- **Learns from your chats:** after every few messages you type yourself, ECHO refines how you write to *that* person (tone, slang, nicknames, emoji, humour, length) and a few general habits for your profile. See and reset it in each friend's **Reply style**. ECHO never learns from its own replies. Turn off with **Learn from my chats**.
-- **Shared posts, Reels and photos:** ECHO reads the caption and looks at photos/post previews, then answers like you would: a short comment, emoji, or a ❤️ reaction. It can't watch videos, so it keeps those replies general. Voice notes still come to you.
-- **Message ideas in the Scheduler:** ✨ Suggest gives ideas that fit the relationship (jokes for close friends, sweet ones for a partner, check-ins for family), optionally for an occasion. Pick one and it's sent **word for word**. New presets: **Partner** and **Family**.
-- **Your day (optional):** share your **city** (never GPS coordinates) and **calendar busy times** for the next 36 h, so replies know when you're busy. ECHO never volunteers where you are or what you're doing; a draft that names your city or an event waits for your OK.
-- **Push is off in this build** (free Apple account). Everything else, including live updates, works. To turn push on later, see [`docs/TESTFLIGHT.md`](docs/TESTFLIGHT.md) §3.
+Built with **SwiftUI**, **Python/FastAPI**, **PostgreSQL**, **Anthropic Claude**, and the **Meta Instagram API**. ECHO runs on a self-hosted Mac backend, with a secure HTTPS tunnel connecting Instagram webhooks and the iPhone app.
 
-**Phase 6 — ready to live with.**
-- **Push notifications** via APNs from your Mac, including "Send test". Tapping one opens the chat or the **Needs you** queue. Setup: [`docs/TESTFLIGHT.md`](docs/TESTFLIGHT.md) §3.
-- **Quiet hours:** no pushes overnight, and optionally no automatic replies either. Notification preferences now live on your server.
-- **Friend memories:** **What ECHO remembers about…** in each chat. You add, pause, approve or forget them. Sensitive ones expire after at most 90 days, and only approved ones are used.
-- **Security review** ([`docs/SECURITY.md`](docs/SECURITY.md)):
-  - secrets are masked in all logs
-  - weak tokens are refused over the tunnel
-  - repeated token guessing is throttled
-  - API docs are local-only
-  - security headers and a body-size limit
-  - a prompt-injection backstop
-- **TestFlight-ready:** app icon, privacy manifest, export-compliance key, push entitlement, and a step-by-step guide.
+> **Project status:** Phase 7.1 — smarter replies, personality learning, consent-aware automation, and SwiftUI stability improvements. Personal project / development build; live Instagram functionality depends on Meta API permissions and a running backend.
 
-**Phase 5 — automatic replies.** When a friend who agreed DMs you, ECHO answers in your voice:
-- **Gates, in order:** consent, AI on, you haven't taken over, global pause, daily limits, safety check, then Meta's 24-hour window. All of them are deterministic code; Claude only writes the text.
-- **Waits a moment first** (per friend, default 45 s), so a burst of messages gets one reply.
-- **Steps back when you reply yourself**, from ECHO or the Instagram app, for 30 minutes (configurable). You can also "Take over" a chat explicitly.
-- **Holds drafts for you** when a message involves money, plans, commitments, something sensitive or emotional, or anything only you can answer. They go to the **Needs you** queue, where you edit, send or dismiss them. You can also set a friend to "check every reply with me".
-- **Consent by DM:** "Ask by DM" sends your consent request; a YES reply grants consent and STOP revokes it, recorded automatically with the message as evidence.
-- **Per-friend reply style:** tone, formality, emoji, length, topics to avoid, custom instructions.
-- **Live:** the app keeps one long-poll request open (`/v1/updates`, about 2 requests a minute), so new DMs, ECHO's replies and held drafts appear within a second or two, with no manual refresh.
-- **Safety net for missed webhooks:** every 30 s (`INSTAGRAM_POLL_SECONDS`) the server pulls your 5 latest chats. Anything new there is treated like a webhook, so unanswered messages still get replies.
-- **Disclosure:** the AI disclosure message goes out before the first automatic reply, and again after 30 days. Missed messages from while the Mac was off (over 2 hours old) are never answered late.
+## Preview
 
-**Phase 4 — real Instagram.**
-- Meta's Instagram API with Unified Login (sign in with Instagram or Facebook, no Facebook Page needed), with encrypted tokens.
-- Signed webhooks bring in your DMs.
-- Scheduled messages are delivered through the official Graph API.
-- Meta's deauthorize and data-deletion callbacks are built in, plus a privacy page.
+<p align="center">
+  <img src="screenshots/messages.PNG" alt="ECHO Messages dashboard showing Instagram integration and automation controls" width="29%" />
+  &nbsp;
+  <img src="screenshots/replies.PNG" alt="Conversation with disclosed AI-generated Instagram reply" width="29%" />
+  &nbsp;
+  <img src="screenshots/review.PNG" alt="Needs you review queue for sensitive messages" width="29%" />
+</p>
 
-New people who DM you always start with AI replies **off** and consent **"Not asked"**.
+## Features
 
-➡️ **Full guide: [`docs/META_SETUP.md`](docs/META_SETUP.md)**: Mac setup, Cloudflare Tunnel, Meta app, testing, App Review, and laptop caveats.
+### Instagram messaging and AI replies
+- Connects to a professional Instagram account using Meta's official API and Unified Login.
+- Receives conversations through signed webhooks, with limited background polling as a fallback when webhooks are unavailable.
+- Updates the iOS inbox while the app is open, without requiring manual sync for every message.
+- Drafts and sends replies in your style after a configurable delay; coalesces quick successive messages.
+- Supports **Fully automatic** or **Review every reply** modes, with per-friend AI controls and consent requirements.
+- Pauses automation after a manual response, and respects rate limits and Instagram's messaging window.
 
-## Quick start
+### Human review and personalization
+- **Needs you:** holds replies that involve sensitive, emotional, financial, or commitment-related topics for review. Supports AI-generated reply suggestions, editing, and manual responses.
+- **Personality:** learns tentative communication preferences such as tone, slang, emoji usage, and typical message length from manually written messages—not from ECHO's own replies.
+- **Per-friend style:** adjusts formality, emoji use, maximum reply length, slang, topics to avoid, and custom instructions.
+- **Friend memory:** stores contextual details with controls for reviewing or forgetting them.
+- **Shared media:** can respond to captions, images, and previews when accessible; Reel/video understanding is limited.
 
-```bash
-cd ~/Downloads/Instagram_App
-chmod +x scripts/*.sh
-./scripts/setup_mac.sh     # once: Python env, PostgreSQL "echo", cloudflared, secrets, migrations
-# edit backend/.env → ECHO_AI_PROVIDER=anthropic, ANTHROPIC_API_KEY=…, and later META_*
-./scripts/start.sh         # backend + Cloudflare Tunnel + caffeinate; prints your https URL and checks
+### Scheduling and context
+- Creates one-time or recurring scheduled messages and offers relationship-aware message suggestions.
+- Supports optional, permission-based context from calendar availability and coarse city-level location.
+- Blocks scheduled sends when eligibility rules fail; missed jobs are **not** sent late.
+
+## App Screenshots
+
+### Personality learning and reply customization
+
+<p align="center">
+  <img src="screenshots/personality.PNG" alt="Personality learning dashboard" width="45%" />
+  &nbsp;
+  <img src="screenshots/style.PNG" alt="Per-friend reply style customization" width="45%" />
+</p>
+
+### Message scheduler
+
+<p align="center">
+  <img src="screenshots/scheduler.PNG" alt="Scheduler showing planned and blocked message jobs" width="42%" />
+</p>
+
+The screenshot gallery shows the primary workflows: inbox automation, a disclosed AI reply, human review, personality learning, per-friend customization, and scheduling. Some screenshots may depict test conversations and development states.
+
+## Architecture
+
+```text
+Instagram / Meta Graph API
+       │
+       │ signed webhooks + message API
+       ▼
+  HTTPS tunnel (ngrok / Cloudflare)
+       │
+       ▼
+FastAPI backend ──────── Anthropic Claude API
+       │
+       ├── PostgreSQL (messages, consent, jobs, memories)
+       │
+       └── background worker (polling, safety checks, scheduling, delivery)
+       ▲
+       │ secure backend API / live updates
+       │
+  SwiftUI iOS app
 ```
 
-In a second terminal, while ECHO runs:
+**Core design principles:** explicit consent; human override; deterministic send-eligibility and safety checks; webhook verification; message deduplication; encrypted Instagram tokens; and no Claude or Meta secrets stored in the iOS app.
 
-```bash
-cd ~/Downloads/Instagram_App/backend
-.venv/bin/python -m app.doctor           # re-run the pre-flight checks any time
-.venv/bin/python -m app.migrate --status # which database migrations are applied
-tail -f ../logs/server.log
-```
+### Tech stack
 
-iOS: `cd ios && xcodegen generate && open Echo.xcodeproj`, then ⌘R. In the app, go to Settings → AI & backend and set:
-- **Backend URL:** `http://localhost:8000` in the Simulator, or the tunnel's `https://…` address on an iPhone
-- **API token:** the value of `ECHO_API_TOKEN` from `backend/.env`
+| Layer | Technology |
+|---|---|
+| iOS | Swift, SwiftUI, XcodeGen |
+| Backend | Python 3.12, FastAPI |
+| Database | PostgreSQL 16 |
+| AI | Anthropic Claude API |
+| Instagram | Meta Instagram Graph API, Unified Login, webhooks |
+| Background processing | Python worker, PostgreSQL job queue |
+| Local HTTPS access | ngrok or Cloudflare Tunnel |
 
-## Updating your existing project
+### Backend status
 
-1. Copy the new files over your existing project, **keeping your `backend/.env`** and `backend/.venv`. Then run `cd ios && xcodegen generate` so Xcode picks up the new Swift files.
-2. Delete the old `backend/supabase/` folder. Migrations now live in `backend/migrations/`.
-3. Delete `backend/Procfile`. It was only used for Railway.
-4. Run `./scripts/setup_mac.sh`. It adds new packages and settings, and records the migrations you already applied by hand.
+<details>
+<summary>Development environment and backend diagnostics</summary>
 
-## What's in the box
+![ECHO backend diagnostic output](screenshots/backend.png)
 
-```
-Instagram_App/
-├── scripts/
-│   ├── setup_mac.sh                  # one-time setup (idempotent)
-│   ├── start.sh                      # run backend + tunnel (quick or named) + caffeinate
-│   └── cloudflared/config.example.yml# named-tunnel config template
-├── backend/
-│   ├── app/
-│   │   ├── migrate.py                # python -m app.migrate  (tracks + detects applied migrations)
-│   │   ├── doctor.py                 # python -m app.doctor   (pre-flight + Meta dashboard URLs)
-│   │   ├── core/public_url.py        # tunnel URL: ECHO_PUBLIC_BASE_URL or backend/.public_url
-│   │   ├── integrations/meta/        # Instagram Graph API client, webhook signatures, signed_request
-│   │   ├── services/                 # chat, scheduler, instagram, webhooks, auto_reply (inbound/consent/takeover), delivery
-│   │   ├── worker/runner.py          # scheduler + webhook processing + hourly maintenance
-│   │   ├── worker/auto_reply.py      # automatic-reply pipeline (gates → Claude → send / react / hold with suggestions)
-│   │   ├── services/style_learning.py# learns how you write to each friend (hourly)
-│   │   ├── services/media.py         # shared posts/Reels/photos → text + safe image fetch
-│   │   └── api/                      # /v1/* , /webhooks/meta , /privacy
-│   ├── migrations/0001…0009.sql      # plain PostgreSQL
-│   ├── tests/                        # 179 tests (fake Graph API + real PostgreSQL)
-│   └── .env.example
-├── ios/                              # SwiftUI app (XcodeGen project.yml)
-└── docs/ARCHITECTURE.md, META_SETUP.md, TESTFLIGHT.md, SECURITY.md
-```
+</details>
 
-## Laptop-specific behaviour
+## Running Locally
 
-- **Sleep:** the server binds to `127.0.0.1` only, and the tunnel is the single way in. `start.sh` keeps the Mac awake with `caffeinate` while ECHO runs, but closing the lid still sleeps it.
-- **Missed webhooks:** Meta unsubscribes webhooks after about an hour of failed deliveries. ECHO re-subscribes at every start and every hour. Use **Settings → Instagram → Sync recent conversations** to backfill.
-- **Scheduled messages missed while offline** are **blocked, never sent late**, and you get a notification.
-- **Quick-tunnel addresses change on every start.** Update the Meta dashboard and the iPhone app each time, or set up a named tunnel (META_SETUP §2b).
+**Requirements:** macOS, Xcode, XcodeGen, Python 3.12, PostgreSQL, an Anthropic API key, and a configured Meta app with access to Instagram messaging. Real messaging requires an eligible professional Instagram account and applicable Meta permissions.
+
+1. Set up the local environment:
+
+   ```bash
+   ./scripts/setup_mac.sh
+   ```
+
+2. Configure local credentials in `backend/.env`, following [`docs/META_SETUP.md`](docs/META_SETUP.md). **Never commit this file.** For real Instagram sends, use `ECHO_MESSAGING_PROVIDER=instagram`.
+
+3. Start the HTTPS tunnel in a separate terminal when using ngrok:
+
+   ```bash
+   ngrok http http://127.0.0.1:8000
+   ```
+
+   Set `ECHO_PUBLIC_BASE_URL` to the forwarding URL in `backend/.env` and configure the matching Meta callback URLs. A Cloudflare tunnel is also supported.
+
+4. Start the backend:
+
+   ```bash
+   ./scripts/start.sh
+   ```
+
+5. Generate and open the iOS project:
+
+   ```bash
+   cd ios
+   xcodegen generate
+   open Echo.xcodeproj
+   ```
+
+   Build in Xcode. In the app's settings, provide the backend URL and `ECHO_API_TOKEN` from your local `.env`.
+
+For full Meta setup, webhook permissions, and troubleshooting, see [`docs/META_SETUP.md`](docs/META_SETUP.md).
 
 ## Tests
 
+The Phase 7 backend suite contains **179 reported tests**, including database-backed messaging flows. To run it against a disposable local test database:
+
 ```bash
 cd backend
-createdb echo_test   # disposable; tests wipe it
+createdb echo_test  # first time only
 ECHO_TEST_DATABASE_URL=postgresql://localhost/echo_test .venv/bin/python -m pytest -q
 ```
 
-The suite has 179 tests, including the automatic-reply pipeline end to end, the migration runner and tunnel URL resolution. iOS: ⌘U.
+**Do not point the test suite at your production `echo` database.** Run iOS tests using **⌘U** in Xcode. The Phase 7.1 SwiftUI fixes and their new iOS tests require local Xcode validation.
+
+## Limitations
+
+- ECHO's Mac backend must remain awake, online, and running to process messages. Closing a laptop lid normally suspends it.
+- Meta's messaging window, app access level, rate limits, and consent restrictions limit when automated replies can be sent.
+- Background polling covers only recent conversations as a fallback; signed webhooks are preferable for prompt updates.
+- Video/Reel understanding is limited when video contents aren't available through the API.
+- Remote APNs push notifications are disabled in the free Apple Personal Team build. The notification code can be re-enabled with an eligible paid development team.
+- Generated replies should be evaluated carefully, especially in emotionally sensitive conversations.
+
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design and message flows
+- [`docs/META_SETUP.md`](docs/META_SETUP.md) — local setup, Instagram authentication, webhook configuration
+- [`docs/SECURITY.md`](docs/SECURITY.md) — security and privacy design
+- [`docs/TESTFLIGHT.md`](docs/TESTFLIGHT.md) — distribution and APNs setup
+
+## Privacy and responsible use
+
+ECHO is designed for messaging **only with users who have granted consent**. New contacts start with AI replies disabled. The app supports AI disclosure, human review, and manual takeover; it should not be used to impersonate others without their knowledge or to bypass Meta platform restrictions.
+
+**Screenshots:** Use test accounts or obtain permission from everyone whose conversations appear in public project materials. Remove personal names, sensitive messages, and private infrastructure information before publication.
