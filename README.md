@@ -40,18 +40,14 @@ Built with **SwiftUI**, **Python/FastAPI**, **PostgreSQL**, **Anthropic Claude**
 
 ## App Screenshots
 
-### Personality learning and reply customization
+### Personality, reply style, and scheduling
 
 <p align="center">
-  <img src="screenshots/personality.PNG" alt="Personality learning dashboard" width="45%" />
+  <img src="screenshots/personality.PNG" alt="Personality learning dashboard" width="29%" />
   &nbsp;
-  <img src="screenshots/style.PNG" alt="Per-friend reply style customization" width="45%" />
-</p>
-
-### Message scheduler
-
-<p align="center">
-  <img src="screenshots/scheduler.PNG" alt="Scheduler showing planned and blocked message jobs" width="42%" />
+  <img src="screenshots/style.PNG" alt="Per-friend reply style customization" width="29%" />
+  &nbsp;
+  <img src="screenshots/scheduler.PNG" alt="Scheduler showing planned and blocked message jobs" width="29%" />
 </p>
 
 The screenshot gallery shows the primary workflows: inbox automation, a disclosed AI reply, human review, personality learning, per-friend customization, and scheduling. Some screenshots may depict test conversations and development states.
@@ -91,14 +87,13 @@ FastAPI backend ──────── Anthropic Claude API
 | Background processing | Python worker, PostgreSQL job queue |
 | Local HTTPS access | ngrok or Cloudflare Tunnel |
 
-### Backend status
+### Backend diagnostics
 
-<details>
-<summary>Development environment and backend diagnostics</summary>
+The ECHO pre-flight checks show the local PostgreSQL database, Claude API, public HTTPS tunnel, Meta webhook verification, and Instagram messaging provider in the development environment.
 
 ![ECHO backend diagnostic output](screenshots/backend.png)
 
-</details>
+> This is a development-status screenshot, not a production uptime or security audit. Redact account identifiers, URLs, tokens, and other private configuration before making this image public.
 
 ## Running Locally
 
