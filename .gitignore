@@ -5,3 +5,4 @@ logs/
 __pycache__/
 .pytest_cache/
 ios/Echo.xcodeproj/
+.DS_Store
